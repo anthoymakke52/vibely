@@ -1255,3 +1255,16 @@ button:focus-visible, input:focus-visible {
     max-height: 92dvh;
   }
 }
+
+.app-shell {
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  grid-template-columns: 290px minmax(0, 1fr);
+}
+
+@media (max-width: 900px) {
+  .app-shell {
+    grid-template-columns: 245px minmax(0, 1fr);
+  }
+}
