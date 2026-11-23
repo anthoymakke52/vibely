@@ -1,4 +1,3 @@
-
 import React, { useEffect, useRef, useState } from 'react';
 import { supabase, supabaseReady } from './supabase';
 import {
@@ -18,7 +17,16 @@ const ACCENTS = {
   red: '#f06464'
 };
 
-const REACTIONS = ['👍', '❤️', '😂', '😮', '😢'];
+// Full emoji reaction collection
+const REACTIONS = [
+  '👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉',
+  '😍', '🥰', '👏', '💯', '🤔', '😎', '😭', '🤣',
+  '😡', '💔', '✨', '🙌', '🤝', '💪', '👀', '🤗',
+  '🥳', '😴', '🤩', '😇', '🤦', '🤷', '👋', '💖',
+  '💜', '💙', '💚', '🫶', '🌹', '⭐', '☀️', '🌈',
+  '😆', '😊', '😉', '😘', '😋', '🤯', '🥺', '😬',
+  '😱', '🤮', '🤒', '😈', '👻', '💀', '💅', '❤️‍🔥'
+];
 
 function usernameToEmail(username) {
   return `${username.trim().toLowerCase()}@vibely.invalid`;
@@ -55,6 +63,7 @@ export default function App() {
   const [reactions, setReactions] = useState({});
   const [readReceipts, setReadReceipts] = useState({});
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+
   const [notificationPermission, setNotificationPermission] = useState(
     typeof window !== 'undefined' && 'Notification' in window
       ? Notification.permission
@@ -76,7 +85,7 @@ export default function App() {
 
   const currentAvatar = myProfile?.avatar_url || '';
 
-  // Authentication
+  // Authentication session
   useEffect(() => {
     if (!supabaseReady) return;
 
@@ -92,9 +101,13 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Load profiles and profile settings
+  // Load profiles
   useEffect(() => {
-    if (!session) return;
+    if (!session) {
+      setProfiles([]);
+      setMyProfile(null);
+      return;
+    }
 
     let alive = true;
 
@@ -114,7 +127,7 @@ export default function App() {
       const list = data || [];
       setProfiles(list);
 
-      const mine = list.find(p => p.id === session.user.id);
+      const mine = list.find(profile => profile.id === session.user.id);
 
       if (mine) {
         setMyProfile(mine);
@@ -141,7 +154,7 @@ export default function App() {
     };
   }, [session]);
 
-  // Online / Offline presence
+  // Online presence
   useEffect(() => {
     if (!session) return;
 
@@ -166,6 +179,7 @@ export default function App() {
 
     return () => {
       supabase.removeChannel(presenceChannel);
+      setOnlineUsers([]);
     };
   }, [session, currentUsername]);
 
@@ -190,11 +204,62 @@ export default function App() {
     };
   }, [session]);
 
-  // Load messages
+  // Load messages, reactions and read receipts
   useEffect(() => {
     if (!session || !activeConversationId) return;
 
     let alive = true;
+
+    async function refreshMessageDetails(messageIds) {
+      if (!messageIds?.length) {
+        setReactions({});
+        setReadReceipts({});
+        return;
+      }
+
+      const [{ data: reactionData, error: reactionError },
+        { data: readData, error: readError }] = await Promise.all([
+        supabase
+          .from('message_reactions')
+          .select('*')
+          .in('message_id', messageIds),
+        supabase
+          .from('message_reads')
+          .select('*')
+          .in('message_id', messageIds)
+      ]);
+
+      if (!alive) return;
+
+      if (reactionError) {
+        setNotice(reactionError.message);
+        return;
+      }
+
+      if (readError) {
+        setNotice(readError.message);
+        return;
+      }
+
+      const reactionMap = {};
+      (reactionData || []).forEach(item => {
+        if (!reactionMap[item.message_id]) {
+          reactionMap[item.message_id] = [];
+        }
+        reactionMap[item.message_id].push(item);
+      });
+
+      const readMap = {};
+      (readData || []).forEach(item => {
+        if (!readMap[item.message_id]) {
+          readMap[item.message_id] = [];
+        }
+        readMap[item.message_id].push(item);
+      });
+
+      setReactions(reactionMap);
+      setReadReceipts(readMap);
+    }
 
     async function loadMessages() {
       setMessages([]);
@@ -219,53 +284,51 @@ export default function App() {
       setMessages(loadedMessages);
 
       const ids = loadedMessages.map(message => message.id);
-      if (!ids.length) return;
 
-      const [{ data: reactionData }, { data: readData }] = await Promise.all([
-        supabase
-          .from('message_reactions')
-          .select('*')
-          .in('message_id', ids),
-        supabase
-          .from('message_reads')
-          .select('*')
-          .in('message_id', ids)
-      ]);
+      if (ids.length) {
+        await refreshMessageDetails(ids);
+      }
 
-      if (!alive) return;
-
-      const reactionMap = {};
-      (reactionData || []).forEach(item => {
-        if (!reactionMap[item.message_id]) reactionMap[item.message_id] = [];
-        reactionMap[item.message_id].push(item);
-      });
-      setReactions(reactionMap);
-
-      const readMap = {};
-      (readData || []).forEach(item => {
-        if (!readMap[item.message_id]) readMap[item.message_id] = [];
-        readMap[item.message_id].push(item);
-      });
-      setReadReceipts(readMap);
+      if (!alive || !ids.length) return;
 
       // Mark incoming messages as read
+      const { data: existingReads, error: readsError } = await supabase
+        .from('message_reads')
+        .select('message_id, user_id')
+        .in('message_id', ids);
+
+      if (readsError) {
+        setNotice(readsError.message);
+        return;
+      }
+
+      const alreadyRead = new Set(
+        (existingReads || [])
+          .filter(item => item.user_id === session.user.id)
+          .map(item => item.message_id)
+      );
+
       const unread = loadedMessages.filter(
-        message => message.sender_id !== session.user.id &&
-          !(readMap[message.id] || []).some(
-            receipt => receipt.user_id === session.user.id
-          )
+        message =>
+          message.sender_id !== session.user.id &&
+          !alreadyRead.has(message.id)
       );
 
       if (unread.length) {
-        await supabase
+        const { error: markError } = await supabase
           .from('message_reads')
           .upsert(
             unread.map(message => ({
               message_id: message.id,
               user_id: session.user.id
             })),
-            { onConflict: 'message_id,user_id', ignoreDuplicates: true }
+            {
+              onConflict: 'message_id,user_id',
+              ignoreDuplicates: true
+            }
           );
+
+        if (markError) setNotice(markError.message);
       }
     }
 
@@ -282,25 +345,32 @@ export default function App() {
           filter: `conversation_id=eq.${activeConversationId}`
         },
         async payload => {
+          if (!alive) return;
+
           if (payload.eventType === 'INSERT') {
             const newMessage = payload.new;
 
             setMessages(previous =>
-              previous.some(m => m.id === newMessage.id)
+              previous.some(message => message.id === newMessage.id)
                 ? previous
                 : [...previous, newMessage]
             );
 
             if (newMessage.sender_id !== session.user.id) {
-              await supabase
+              const { error: readError } = await supabase
                 .from('message_reads')
                 .upsert(
                   {
                     message_id: newMessage.id,
                     user_id: session.user.id
                   },
-                  { onConflict: 'message_id,user_id', ignoreDuplicates: true }
+                  {
+                    onConflict: 'message_id,user_id',
+                    ignoreDuplicates: true
+                  }
                 );
+
+              if (readError) setNotice(readError.message);
 
               if (
                 typeof window !== 'undefined' &&
@@ -337,7 +407,17 @@ export default function App() {
           schema: 'public',
           table: 'message_reactions'
         },
-        () => refreshMessageDetails()
+        async () => {
+          const { data } = await supabase
+            .from('messages')
+            .select('id')
+            .eq('conversation_id', activeConversationId)
+            .limit(100);
+
+          if (alive) {
+            await refreshMessageDetails((data || []).map(item => item.id));
+          }
+        }
       )
       .on(
         'postgres_changes',
@@ -346,42 +426,19 @@ export default function App() {
           schema: 'public',
           table: 'message_reads'
         },
-        () => refreshMessageDetails()
+        async () => {
+          const { data } = await supabase
+            .from('messages')
+            .select('id')
+            .eq('conversation_id', activeConversationId)
+            .limit(100);
+
+          if (alive) {
+            await refreshMessageDetails((data || []).map(item => item.id));
+          }
+        }
       )
       .subscribe();
-
-    async function refreshMessageDetails() {
-      const { data: currentMessages } = await supabase
-        .from('messages')
-        .select('id')
-        .eq('conversation_id', activeConversationId)
-        .limit(100);
-
-      const ids = (currentMessages || []).map(item => item.id);
-      if (!ids.length || !alive) return;
-
-      const [{ data: reactionData }, { data: readData }] = await Promise.all([
-        supabase.from('message_reactions').select('*').in('message_id', ids),
-        supabase.from('message_reads').select('*').in('message_id', ids)
-      ]);
-
-      if (!alive) return;
-
-      const reactionMap = {};
-      (reactionData || []).forEach(item => {
-        if (!reactionMap[item.message_id]) reactionMap[item.message_id] = [];
-        reactionMap[item.message_id].push(item);
-      });
-
-      const readMap = {};
-      (readData || []).forEach(item => {
-        if (!readMap[item.message_id]) readMap[item.message_id] = [];
-        readMap[item.message_id].push(item);
-      });
-
-      setReactions(reactionMap);
-      setReadReceipts(readMap);
-    }
 
     return () => {
       alive = false;
@@ -389,7 +446,7 @@ export default function App() {
     };
   }, [session, activeConversationId]);
 
-  // Typing indicator channel
+  // Typing indicator
   useEffect(() => {
     if (!session || !activeConversationId) return;
 
@@ -405,7 +462,6 @@ export default function App() {
     channel
       .on('broadcast', { event: 'typing' }, ({ payload }) => {
         if (payload?.user_id === session.user.id) return;
-
         setTypingUser(payload?.is_typing ? payload.username : '');
       })
       .subscribe();
@@ -451,8 +507,10 @@ export default function App() {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Save profile name, theme and accent color
+  // Save profile settings
   async function updateProfile(updates) {
+    if (!session) return false;
+
     const { data, error } = await supabase
       .from('profiles')
       .update(updates)
@@ -467,12 +525,16 @@ export default function App() {
 
     if (data) {
       setMyProfile(data);
+
       setProfiles(previous =>
-        previous.map(profile => profile.id === data.id ? data : profile)
+        previous.map(profile =>
+          profile.id === data.id ? data : profile
+        )
       );
 
       if (data.theme) setTheme(data.theme);
       if (data.accent_color) setAccent(data.accent_color);
+
       if (data.display_name !== undefined) {
         setDisplayName(data.display_name || '');
       }
@@ -489,7 +551,10 @@ export default function App() {
       return;
     }
 
-    const success = await updateProfile({ display_name: cleanName });
+    const success = await updateProfile({
+      display_name: cleanName
+    });
+
     if (success) setNotice('Your profile name has been updated.');
   }
 
@@ -500,7 +565,7 @@ export default function App() {
     await updateProfile({ [field]: value });
   }
 
-  // Upload profile avatar
+  // Upload avatar
   async function uploadAvatar(file) {
     if (!file || !session) return;
 
@@ -538,10 +603,10 @@ export default function App() {
       .getPublicUrl(path);
 
     const avatarUrl = `${urlData.publicUrl}?t=${Date.now()}`;
-
     const success = await updateProfile({ avatar_url: avatarUrl });
 
     if (success) setNotice('Your avatar has been updated!');
+
     setAvatarBusy(false);
   }
 
@@ -562,7 +627,7 @@ export default function App() {
     }
   }
 
-  // Authentication
+  // Login / Signup
   async function authenticate(e) {
     e.preventDefault();
     setBusy(true);
@@ -571,7 +636,9 @@ export default function App() {
     const cleanUsername = username.trim().toLowerCase();
 
     if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
-      setNotice('Username must be 3–20 characters. Use letters, numbers, and underscores.');
+      setNotice(
+        'Username must be 3–20 characters. Use letters, numbers, and underscores.'
+      );
       setBusy(false);
       return;
     }
@@ -600,7 +667,9 @@ export default function App() {
         if (error) throw error;
 
         if (!data.session) {
-          setNotice('Account created. Please check your Supabase confirmation settings.');
+          setNotice(
+            'Account created. Please check your Supabase confirmation settings.'
+          );
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -611,7 +680,7 @@ export default function App() {
         if (error) throw error;
       }
     } catch (error) {
-      setNotice(error.message);
+      setNotice(error.message || 'Authentication failed.');
     } finally {
       setBusy(false);
     }
@@ -652,7 +721,7 @@ export default function App() {
     setMobileSidebarOpen(false);
   }
 
-  // Send message
+  // Send text message
   async function sendMessage(e) {
     e.preventDefault();
 
@@ -667,7 +736,7 @@ export default function App() {
       .insert({
         conversation_id: activeConversationId,
         sender_id: session.user.id,
-        sender_name: currentUsername,
+        sender_name: currentDisplayName,
         content
       })
       .select()
@@ -681,7 +750,7 @@ export default function App() {
 
     if (data) {
       setMessages(previous =>
-        previous.some(m => m.id === data.id)
+        previous.some(message => message.id === data.id)
           ? previous
           : [...previous, data]
       );
@@ -698,15 +767,24 @@ export default function App() {
     });
   }
 
-  // Upload chat image or audio
+  // Upload image or audio
   async function uploadFile(file) {
     if (!file || !session) return;
+
+    if (
+      !file.type.startsWith('image/') &&
+      !file.type.startsWith('audio/')
+    ) {
+      setNotice('Please choose an image or audio file.');
+      return;
+    }
 
     if (file.size > 10 * 1024 * 1024) {
       setNotice('Please choose a file smaller than 10 MB.');
       return;
     }
 
+    setBusy(true);
     setNotice('');
 
     const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -714,10 +792,13 @@ export default function App() {
 
     const { error: uploadError } = await supabase.storage
       .from('chat-media')
-      .upload(path, file);
+      .upload(path, file, {
+        contentType: file.type
+      });
 
     if (uploadError) {
       setNotice(uploadError.message);
+      setBusy(false);
       return;
     }
 
@@ -730,7 +811,7 @@ export default function App() {
       .insert({
         conversation_id: activeConversationId,
         sender_id: session.user.id,
-        sender_name: currentUsername,
+        sender_name: currentDisplayName,
         media_url: urlData.publicUrl,
         media_type: file.type.startsWith('image/') ? 'image' : 'audio'
       })
@@ -741,11 +822,13 @@ export default function App() {
       setNotice(error.message);
     } else if (data) {
       setMessages(previous =>
-        previous.some(m => m.id === data.id)
+        previous.some(message => message.id === data.id)
           ? previous
           : [...previous, data]
       );
     }
+
+    setBusy(false);
   }
 
   // Edit own message
@@ -783,42 +866,66 @@ export default function App() {
 
     const { error } = await supabase
       .from('messages')
-      .update({ deleted_at: new Date().toISOString() })
+      .update({
+        deleted_at: new Date().toISOString()
+      })
       .eq('id', message.id)
       .eq('sender_id', session.user.id);
 
     if (error) setNotice(error.message);
   }
 
-  // Toggle reaction
+  // Toggle reaction: add or remove the selected emoji
   async function toggleReaction(messageId, reaction) {
-    const existing = (reactions[messageId] || []).find(
+    if (!session) return;
+
+    const existing = (reactions[messageId] || []).some(
       item =>
         item.user_id === session.user.id &&
         item.reaction === reaction
     );
 
+    let result;
+
     if (existing) {
-      const { error } = await supabase
+      result = await supabase
         .from('message_reactions')
         .delete()
-        .eq('id', existing.id);
-
-      if (error) setNotice(error.message);
+        .eq('message_id', messageId)
+        .eq('user_id', session.user.id)
+        .eq('reaction', reaction);
     } else {
-      const { error } = await supabase
+      result = await supabase
         .from('message_reactions')
         .insert({
           message_id: messageId,
           user_id: session.user.id,
           reaction
         });
-
-      if (error) setNotice(error.message);
     }
+
+    if (result.error) {
+      setNotice(result.error.message);
+      return;
+    }
+
+    const { data, error } = await supabase
+      .from('message_reactions')
+      .select('*')
+      .eq('message_id', messageId);
+
+    if (error) {
+      setNotice(error.message);
+      return;
+    }
+
+    setReactions(previous => ({
+      ...previous,
+      [messageId]: data || []
+    }));
   }
 
-  // Avatar display helper
+  // Avatar component
   function Avatar({ profile, label, size = 'small' }) {
     const avatarUrl = profile?.avatar_url;
 
@@ -844,6 +951,7 @@ export default function App() {
     );
   }
 
+  // Supabase setup check
   if (!supabaseReady) {
     return (
       <main className="auth-wrap">
@@ -855,6 +963,7 @@ export default function App() {
     );
   }
 
+  // Login / Signup screen
   if (!session) {
     return (
       <main className="auth-wrap">
@@ -901,12 +1010,18 @@ export default function App() {
             </label>
 
             <button className="primary full" disabled={busy}>
-              {busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
+              {busy
+                ? 'Please wait…'
+                : mode === 'login'
+                  ? 'Sign in'
+                  : 'Create account'}
             </button>
           </form>
 
           <p className="switch">
-            {mode === 'login' ? 'New to Vibely?' : 'Already have an account?'}
+            {mode === 'login'
+              ? 'New to Vibely?'
+              : 'Already have an account?'}
             {' '}
             <button
               type="button"
@@ -937,50 +1052,61 @@ export default function App() {
     <main
       className="app-shell"
       data-theme={theme}
-      style={{ '--vibely-accent': ACCENTS[accent] || ACCENTS.purple }}
+      style={{
+        '--vibely-accent': ACCENTS[accent] || ACCENTS.purple
+      }}
     >
       <style>{`
         .app-shell[data-theme="light"] {
           background: #edf1fa !important;
           color: #202438 !important;
         }
+
         .app-shell[data-theme="light"] .sidebar,
         .app-shell[data-theme="light"] .chat-panel {
           background: rgba(255,255,255,.94) !important;
           color: #202438 !important;
           border-color: #dce2ef !important;
         }
+
         .app-shell[data-theme="light"] .chat-header,
         .app-shell[data-theme="light"] .composer {
           background: rgba(255,255,255,.96) !important;
           border-color: #dce2ef !important;
         }
+
         .app-shell[data-theme="light"] .message-input,
         .app-shell[data-theme="light"] .people-search input {
           color: #202438 !important;
         }
+
         .app-shell[data-theme="light"] .bubble {
           background: #e8ebf5 !important;
           color: #202438 !important;
         }
+
         .app-shell[data-theme="light"] .message.mine .bubble {
           background: var(--vibely-accent) !important;
           color: white !important;
         }
+
         .app-shell[data-theme="light"] .side-label,
         .app-shell[data-theme="light"] .muted,
         .app-shell[data-theme="light"] .chat-header p {
           color: #737b91 !important;
         }
+
         .app-shell button.primary,
         .app-shell .send-btn,
         .app-shell .nav-item.active {
           background: var(--vibely-accent) !important;
         }
+
         .avatar {
           object-fit: cover;
           flex-shrink: 0;
         }
+
         .settings-button {
           display: flex;
           align-items: center;
@@ -996,6 +1122,7 @@ export default function App() {
           cursor: pointer;
           font: inherit;
         }
+
         .settings-overlay {
           position: fixed;
           inset: 0;
@@ -1007,6 +1134,7 @@ export default function App() {
           background: rgba(5,8,18,.7);
           backdrop-filter: blur(9px);
         }
+
         .settings-card {
           width: min(430px, 100%);
           max-height: 90vh;
@@ -1018,20 +1146,30 @@ export default function App() {
           color: ${theme === 'light' ? '#202438' : '#fff'};
           box-shadow: 0 25px 80px rgba(0,0,0,.35);
         }
+
         .settings-top {
           display: flex;
           align-items: center;
           justify-content: space-between;
           margin-bottom: 22px;
         }
-        .settings-top h2 { margin: 0; font-size: 21px; }
+
+        .settings-top h2 {
+          margin: 0;
+          font-size: 21px;
+        }
+
         .settings-close {
           border: 0;
           background: transparent;
           color: inherit;
           cursor: pointer;
         }
-        .settings-section { margin: 22px 0; }
+
+        .settings-section {
+          margin: 22px 0;
+        }
+
         .settings-section h3 {
           display: flex;
           align-items: center;
@@ -1039,17 +1177,20 @@ export default function App() {
           margin: 0 0 12px;
           font-size: 14px;
         }
+
         .avatar-preview {
           display: flex;
           align-items: center;
           gap: 15px;
         }
+
         .avatar-preview .avatar {
           width: 68px;
           height: 68px;
           border-radius: 50%;
           font-size: 25px;
         }
+
         .upload-avatar {
           padding: 10px 14px;
           border: 0;
@@ -1059,11 +1200,18 @@ export default function App() {
           cursor: pointer;
           font: inherit;
         }
+
+        .upload-avatar:disabled {
+          opacity: .6;
+          cursor: not-allowed;
+        }
+
         .settings-options {
           display: flex;
           flex-wrap: wrap;
           gap: 9px;
         }
+
         .theme-option {
           display: flex;
           align-items: center;
@@ -1077,21 +1225,25 @@ export default function App() {
           cursor: pointer;
           font: inherit;
         }
+
         .theme-option.selected {
           border: 2px solid var(--vibely-accent);
           background: rgba(150,150,180,.15);
         }
+
         .color-dot {
           width: 21px;
           height: 21px;
           border-radius: 50%;
           border: 2px solid rgba(255,255,255,.5);
         }
+
         .settings-note {
           margin-top: 16px;
           font-size: 12px;
           opacity: .65;
         }
+
         .profile-name-input {
           width: 100%;
           padding: 11px 12px;
@@ -1102,30 +1254,33 @@ export default function App() {
           color: inherit;
           font: inherit;
         }
-        .online-dot {
-          display: inline-block;
-          width: 8px;
-          height: 8px;
-          margin-right: 6px;
-          border-radius: 50%;
-          background: #28c994;
-        }
+
+        .online-dot,
         .offline-dot {
           display: inline-block;
           width: 8px;
           height: 8px;
           margin-right: 6px;
           border-radius: 50%;
+        }
+
+        .online-dot {
+          background: #28c994;
+        }
+
+        .offline-dot {
           background: #9297a8;
         }
+
         .message-actions {
           display: flex;
           align-items: center;
           flex-wrap: wrap;
           gap: 5px;
           margin-top: 7px;
-          opacity: .85;
+          opacity: .9;
         }
+
         .message-actions button,
         .reaction-button {
           padding: 4px 7px;
@@ -1136,32 +1291,101 @@ export default function App() {
           cursor: pointer;
           font-size: 12px;
         }
+
         .reaction-list {
           display: flex;
           flex-wrap: wrap;
           gap: 5px;
           margin-top: 7px;
         }
+
         .reaction-button.selected {
           border-color: var(--vibely-accent);
           background: rgba(155,123,255,.2);
         }
+
+        .reaction-picker {
+          position: relative;
+        }
+
+        .reaction-picker summary {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          padding: 5px 8px;
+          border: 1px solid rgba(150,150,180,.2);
+          border-radius: 8px;
+          background: rgba(150,150,180,.08);
+          color: inherit;
+          cursor: pointer;
+          font-size: 12px;
+          list-style: none;
+        }
+
+        .reaction-picker summary::-webkit-details-marker {
+          display: none;
+        }
+
+        .reaction-picker[open] .emoji-grid {
+          display: grid;
+        }
+
+        .emoji-grid {
+          position: absolute;
+          z-index: 20;
+          left: 0;
+          bottom: 34px;
+          display: none;
+          grid-template-columns: repeat(7, 1fr);
+          gap: 4px;
+          width: 245px;
+          max-height: 190px;
+          overflow-y: auto;
+          padding: 9px;
+          border: 1px solid rgba(150,150,180,.25);
+          border-radius: 12px;
+          background: ${theme === 'light' ? '#fff' : '#202236'};
+          box-shadow: 0 8px 25px rgba(0,0,0,.25);
+        }
+
+        .emoji-grid button {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          min-width: 28px;
+          height: 29px;
+          padding: 2px;
+          border: 0;
+          border-radius: 7px;
+          background: transparent;
+          color: inherit;
+          cursor: pointer;
+          font-size: 18px;
+        }
+
+        .emoji-grid button:hover {
+          background: rgba(150,150,180,.2);
+        }
+
         .typing-indicator {
           padding: 8px 16px;
           color: #9297a8;
           font-size: 12px;
         }
+
         .edited-label {
           margin-left: 5px;
           font-size: 10px;
           opacity: .65;
         }
+
         .read-label {
           margin-top: 5px;
           text-align: right;
           font-size: 10px;
           opacity: .7;
         }
+
         .mobile-menu-button {
           display: none;
           border: 0;
@@ -1170,6 +1394,7 @@ export default function App() {
           cursor: pointer;
           padding: 7px;
         }
+
         .notification-button {
           display: flex;
           align-items: center;
@@ -1185,9 +1410,31 @@ export default function App() {
           cursor: pointer;
           font: inherit;
         }
+
+        .shared-image {
+          display: block;
+          max-width: min(320px, 100%);
+          max-height: 350px;
+          margin-top: 8px;
+          border-radius: 12px;
+          object-fit: contain;
+        }
+
+        .deleted-message {
+          opacity: .65;
+          font-style: italic;
+        }
+
         @media (max-width: 700px) {
-          .mobile-menu-button { display: inline-flex; }
-          .app-shell { position: relative; overflow: hidden; }
+          .mobile-menu-button {
+            display: inline-flex;
+          }
+
+          .app-shell {
+            position: relative;
+            overflow: hidden;
+          }
+
           .app-shell .sidebar {
             position: absolute !important;
             z-index: 50;
@@ -1197,30 +1444,39 @@ export default function App() {
             transition: transform .25s ease;
             box-shadow: 15px 0 40px rgba(0,0,0,.25);
           }
-          .app-shell.mobile-sidebar-open .sidebar {
+
+          /* Fixed: mobile-sidebar-open is on app-shell-content */
+          .app-shell-content.mobile-sidebar-open .sidebar {
             transform: translateX(0);
           }
+
           .app-shell .chat-panel {
             width: 100% !important;
             min-width: 0 !important;
           }
+
           .app-shell .chat-header {
             gap: 8px;
           }
+
           .app-shell .messages {
             padding-left: 12px;
             padding-right: 12px;
           }
+
           .app-shell .composer {
             gap: 7px;
             padding: 10px;
           }
+
           .app-shell .message-input {
             min-width: 0;
           }
+
           .app-shell .message {
             max-width: 100%;
           }
+
           .app-shell .settings-card {
             padding: 18px;
           }
@@ -1228,7 +1484,9 @@ export default function App() {
       `}</style>
 
       <div
-        className={`app-shell-content ${mobileSidebarOpen ? 'mobile-sidebar-open' : ''}`}
+        className={`app-shell-content ${
+          mobileSidebarOpen ? 'mobile-sidebar-open' : ''
+        }`}
       >
         <aside className="sidebar">
           <div className="brand">
@@ -1243,7 +1501,10 @@ export default function App() {
               <b>{currentDisplayName}</b>
               <small><span className="online-dot" />Online</small>
             </div>
-            <button title="Sign out" onClick={() => supabase.auth.signOut()}>
+            <button
+              title="Sign out"
+              onClick={() => supabase.auth.signOut()}
+            >
               <LogOut size={17} />
             </button>
           </div>
@@ -1304,14 +1565,16 @@ export default function App() {
                 >
                   <Avatar
                     profile={person}
-                    label={person.display_name || person.username || 'U'}
+                    label={person.display_name || person.username}
                   />
+
                   <span>
                     {person.display_name || person.username || 'Vibely member'}
                     <small style={{ display: 'block', opacity: .65 }}>
                       {isOnline ? 'Online' : 'Offline'}
                     </small>
                   </span>
+
                   {isOnline
                     ? <Circle size={9} fill="#28c994" color="#28c994" />
                     : <MessageCircle size={15} />}
@@ -1320,7 +1583,9 @@ export default function App() {
             })}
 
             {visiblePeople.length === 0 && (
-              <p className="muted people-empty">No other users found yet.</p>
+              <p className="muted people-empty">
+                No other users found yet.
+              </p>
             )}
           </div>
 
@@ -1349,6 +1614,7 @@ export default function App() {
                   ? (selectedPerson.display_name || selectedPerson.username)
                   : 'Public lounge'}
               </h2>
+
               <p>
                 {selectedPerson
                   ? onlineUsers.includes(selectedPerson.id)
@@ -1383,7 +1649,9 @@ export default function App() {
                   profile={selectedPerson}
                   label={selectedPerson.display_name || selectedPerson.username}
                 />
-                <h3>{selectedPerson.display_name || selectedPerson.username}</h3>
+                <h3>
+                  {selectedPerson.display_name || selectedPerson.username}
+                </h3>
                 <p>
                   {onlineUsers.includes(selectedPerson.id) ? 'Online' : 'Offline'}
                 </p>
@@ -1428,12 +1696,14 @@ export default function App() {
                   <div className="bubble-wrap">
                     <div className="message-meta">
                       <b>{senderName}</b>
+
                       <time>
                         {new Date(message.created_at).toLocaleTimeString([], {
                           hour: '2-digit',
                           minute: '2-digit'
                         })}
                       </time>
+
                       {message.edited_at && !isDeleted && (
                         <span className="edited-label">Edited</span>
                       )}
@@ -1454,11 +1724,14 @@ export default function App() {
                             className="shared-image"
                             src={message.media_url}
                             alt="Shared image"
+                            loading="lazy"
                           />
                         )}
 
                         {message.media_type === 'audio' && (
-                          <audio controls src={message.media_url} />
+                          <audio controls src={message.media_url}>
+                            Your browser does not support audio playback.
+                          </audio>
                         )}
 
                         <div className="message-actions">
@@ -1479,8 +1752,14 @@ export default function App() {
                               return (
                                 <button
                                   key={emoji}
-                                  className={`reaction-button ${selected ? 'selected' : ''}`}
-                                  onClick={() => toggleReaction(message.id, emoji)}
+                                  type="button"
+                                  className={`reaction-button ${
+                                    selected ? 'selected' : ''
+                                  }`}
+                                  title={`${count} reaction(s)`}
+                                  onClick={() =>
+                                    toggleReaction(message.id, emoji)
+                                  }
                                 >
                                   {emoji} {count}
                                 </button>
@@ -1488,15 +1767,31 @@ export default function App() {
                             })}
                           </div>
 
-                          <div className="reaction-picker">
-                            <button
-                              type="button"
-                              title="React"
-                              onClick={() => toggleReaction(message.id, '👍')}
-                            >
+                          {/* Full emoji reaction picker */}
+                          <details className="reaction-picker">
+                            <summary title="Choose an emoji reaction">
                               <Smile size={14} />
-                            </button>
-                          </div>
+                              React
+                            </summary>
+
+                            <div className="emoji-grid">
+                              {REACTIONS.map(emoji => (
+                                <button
+                                  key={emoji}
+                                  type="button"
+                                  title={`React ${emoji}`}
+                                  onClick={event => {
+                                    toggleReaction(message.id, emoji);
+                                    event.currentTarget
+                                      .closest('details')
+                                      ?.removeAttribute('open');
+                                  }}
+                                >
+                                  {emoji}
+                                </button>
+                              ))}
+                            </div>
+                          </details>
 
                           {isMine && (
                             <>
@@ -1509,6 +1804,7 @@ export default function App() {
                                   <Pencil size={13} /> Edit
                                 </button>
                               )}
+
                               <button
                                 type="button"
                                 title="Delete message"
@@ -1531,7 +1827,9 @@ export default function App() {
             })}
 
             {messages.length === 0 && selectedPerson && (
-              <p className="muted empty-chat">No messages yet. Say hello!</p>
+              <p className="muted empty-chat">
+                No messages yet. Say hello!
+              </p>
             )}
 
             <div ref={bottom} />
@@ -1549,6 +1847,7 @@ export default function App() {
               <input
                 type="file"
                 accept="image/*,audio/*"
+                disabled={busy}
                 onChange={e => {
                   uploadFile(e.target.files?.[0]);
                   e.target.value = '';
@@ -1577,7 +1876,11 @@ export default function App() {
           </form>
 
           {notice && (
-            <div className="toast" onClick={() => setNotice('')}>
+            <div
+              className="toast"
+              role="status"
+              onClick={() => setNotice('')}
+            >
               {notice} <b>×</b>
             </div>
           )}
@@ -1589,19 +1892,24 @@ export default function App() {
         </section>
       </div>
 
+      {/* Profile and appearance settings */}
       {settingsOpen && (
         <div
           className="settings-overlay"
           onClick={e => {
-            if (e.target === e.currentTarget) setSettingsOpen(false);
+            if (e.target === e.currentTarget) {
+              setSettingsOpen(false);
+            }
           }}
         >
           <section className="settings-card">
             <div className="settings-top">
               <h2>Profile & Appearance</h2>
+
               <button
                 className="settings-close"
                 onClick={() => setSettingsOpen(false)}
+                aria-label="Close settings"
               >
                 <X size={21} />
               </button>
@@ -1609,6 +1917,7 @@ export default function App() {
 
             <div className="settings-section">
               <h3><UserRound size={17} /> Edit Profile</h3>
+
               <label>
                 Display name
                 <input
@@ -1619,7 +1928,11 @@ export default function App() {
                   placeholder="Your display name"
                 />
               </label>
-              <button className="upload-avatar" onClick={saveDisplayName}>
+
+              <button
+                className="upload-avatar"
+                onClick={saveDisplayName}
+              >
                 <Check size={15} style={{ verticalAlign: 'middle' }} />
                 {' '}Save Profile
               </button>
@@ -1637,6 +1950,7 @@ export default function App() {
 
                 <div>
                   <b>{currentDisplayName}</b>
+
                   <p className="muted" style={{ margin: '5px 0 9px' }}>
                     Choose your profile picture
                   </p>
@@ -1670,7 +1984,9 @@ export default function App() {
 
               <div className="settings-options">
                 <button
-                  className={`theme-option ${theme === 'dark' ? 'selected' : ''}`}
+                  className={`theme-option ${
+                    theme === 'dark' ? 'selected' : ''
+                  }`}
                   onClick={() => updateCustomization('theme', 'dark')}
                 >
                   <Moon size={17} /> Dark
@@ -1678,7 +1994,9 @@ export default function App() {
                 </button>
 
                 <button
-                  className={`theme-option ${theme === 'light' ? 'selected' : ''}`}
+                  className={`theme-option ${
+                    theme === 'light' ? 'selected' : ''
+                  }`}
                   onClick={() => updateCustomization('theme', 'light')}
                 >
                   <Sun size={17} /> Light
@@ -1694,15 +2012,21 @@ export default function App() {
                 {Object.entries(ACCENTS).map(([key, color]) => (
                   <button
                     key={key}
-                    className={`theme-option ${accent === key ? 'selected' : ''}`}
-                    onClick={() => updateCustomization('accent_color', key)}
+                    className={`theme-option ${
+                      accent === key ? 'selected' : ''
+                    }`}
+                    onClick={() =>
+                      updateCustomization('accent_color', key)
+                    }
                     title={key}
                   >
                     <span
                       className="color-dot"
                       style={{ background: color }}
                     />
+
                     {key[0].toUpperCase() + key.slice(1)}
+
                     {accent === key && <Check size={14} />}
                   </button>
                 ))}
@@ -1711,6 +2035,7 @@ export default function App() {
 
             <div className="settings-section">
               <h3><Bell size={17} /> Notifications</h3>
+
               <button
                 className="notification-button"
                 onClick={enableNotifications}
