@@ -3,7 +3,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { supabase, supabaseReady } from './supabase';
 import {
   Send, LogOut, Users, MessageCircle, ImagePlus,
-  Video, Smile, Search
+  Search, ArrowLeft, UserRound
 } from 'lucide-react';
 
 const LOUNGE = '00000000-0000-0000-0000-000000000001';
@@ -18,23 +18,26 @@ export default function App() {
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
   const [mode, setMode] = useState('login');
+
   const [messages, setMessages] = useState([]);
-  const [profiles, setProfiles] = useState({});
+  const [profiles, setProfiles] = useState([]);
   const [draft, setDraft] = useState('');
   const [notice, setNotice] = useState('');
-  const [online, setOnline] = useState(1);
   const [busy, setBusy] = useState(false);
-  const [cameraOn, setCameraOn] = useState(false);
+  const [search, setSearch] = useState('');
+
+  const [activeConversationId, setActiveConversationId] = useState(LOUNGE);
+  const [selectedPerson, setSelectedPerson] = useState(null);
+  const [loadingChat, setLoadingChat] = useState(false);
 
   const bottom = useRef(null);
-  const videoRef = useRef(null);
 
   const currentUsername =
     session?.user?.user_metadata?.username ||
-    profiles[session?.user?.id] ||
     session?.user?.email?.split('@')[0] ||
     'User';
 
+  // Authentication
   useEffect(() => {
     if (!supabaseReady) return;
 
@@ -44,136 +47,113 @@ export default function App() {
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, s) => setSession(s)
+      (_event, currentSession) => {
+        setSession(currentSession);
+      }
     );
 
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Load all usernames and messages for every signed-in user
-  async function loadProfiles() {
-    const { data, error } = await supabase
-      .from('profiles')
-      .select('id, username');
-
-    if (error) {
-      setNotice(error.message);
-      return {};
-    }
-
-    const profileMap = {};
-
-    (data || []).forEach(profile => {
-      profileMap[profile.id] = profile.username;
-    });
-
-    setProfiles(profileMap);
-    return profileMap;
-  }
-
-  async function loadMessages() {
-    const [messageResult, profileResult] = await Promise.all([
-      supabase
-        .from('messages')
-        .select('*')
-        .eq('conversation_id', LOUNGE)
-        .order('created_at')
-        .limit(100),
-
-      supabase
-        .from('profiles')
-        .select('id, username')
-    ]);
-
-    if (messageResult.error) {
-      setNotice(messageResult.error.message);
-      return;
-    }
-
-    let profileMap = {};
-
-    if (profileResult.error) {
-      setNotice(profileResult.error.message);
-    } else {
-      (profileResult.data || []).forEach(profile => {
-        profileMap[profile.id] = profile.username;
-      });
-
-      setProfiles(profileMap);
-    }
-
-    setMessages(
-      (messageResult.data || []).map(message => ({
-        ...message,
-        sender_name:
-          profileMap[message.sender_id] ||
-          message.sender_name ||
-          'Vibely member'
-      }))
-    );
-  }
-
+  // Load all public user profiles
   useEffect(() => {
     if (!session) return;
 
+    async function loadProfiles() {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('id, username')
+        .order('username');
+
+      if (error) {
+        setNotice(error.message);
+        return;
+      }
+
+      setProfiles(data || []);
+    }
+
+    loadProfiles();
+
+    const profileChannel = supabase
+      .channel('vibely-profile-updates')
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'profiles'
+        },
+        loadProfiles
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(profileChannel);
+    };
+  }, [session]);
+
+  // Load messages for the selected conversation
+  useEffect(() => {
+    if (!session || !activeConversationId) return;
+
+    let alive = true;
+
+    async function loadMessages() {
+      setMessages([]);
+
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', activeConversationId)
+        .order('created_at', { ascending: true })
+        .limit(100);
+
+      if (!alive) return;
+
+      if (error) {
+        setNotice(error.message);
+        return;
+      }
+
+      setMessages(data || []);
+    }
+
     loadMessages();
 
-    const channel = supabase.channel('vibely-lounge')
+    const channel = supabase
+      .channel(`chat-${activeConversationId}`)
       .on(
         'postgres_changes',
         {
           event: 'INSERT',
           schema: 'public',
           table: 'messages',
-          filter: `conversation_id=eq.${LOUNGE}`
+          filter: `conversation_id=eq.${activeConversationId}`
         },
-        async payload => {
+        payload => {
           const newMessage = payload.new;
 
-          setMessages(prev =>
-            prev.some(m => m.id === newMessage.id)
-              ? prev
-              : [...prev, newMessage]
+          setMessages(previous =>
+            previous.some(m => m.id === newMessage.id)
+              ? previous
+              : [...previous, newMessage]
           );
-
-          // Look up the sender's public username
-          if (newMessage.sender_id) {
-            const { data } = await supabase
-              .from('profiles')
-              .select('username')
-              .eq('id', newMessage.sender_id)
-              .maybeSingle();
-
-            if (data?.username) {
-              setProfiles(prev => ({
-                ...prev,
-                [newMessage.sender_id]: data.username
-              }));
-            }
-          }
         }
       )
-      .on('presence', { event: 'sync' }, () => {
-        setOnline(Object.keys(channel.presenceState()).length);
-      })
-      .subscribe(async status => {
-        if (status === 'SUBSCRIBED') {
-          await channel.track({
-            user: session.user.id,
-            online_at: new Date().toISOString()
-          });
-        }
-      });
+      .subscribe();
 
     return () => {
+      alive = false;
       supabase.removeChannel(channel);
     };
-  }, [session]);
+  }, [session, activeConversationId]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  // Login and signup
   async function authenticate(e) {
     e.preventDefault();
     setBusy(true);
@@ -182,9 +162,7 @@ export default function App() {
     const cleanUsername = username.trim().toLowerCase();
 
     if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
-      setNotice(
-        'Username must be 3–20 characters. Use only letters, numbers, and underscores.'
-      );
+      setNotice('Username must be 3–20 characters. Use letters, numbers, and underscores.');
       setBusy(false);
       return;
     }
@@ -212,12 +190,8 @@ export default function App() {
 
         if (error) throw error;
 
-        if (data.session) {
-          setNotice('Your Vibely account has been created!');
-        } else {
-          setNotice(
-            'Account created. Please check your Supabase email confirmation settings.'
-          );
+        if (!data.session) {
+          setNotice('Account created. Please check your Supabase confirmation settings.');
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -234,19 +208,54 @@ export default function App() {
     }
   }
 
+  // Open a private conversation with another user
+  async function openPrivateChat(person) {
+    if (!session || !person || person.id === session.user.id) return;
+
+    setLoadingChat(true);
+    setNotice('');
+
+    const { data, error } = await supabase.rpc(
+      'open_private_chat',
+      { target_user: person.id }
+    );
+
+    setLoadingChat(false);
+
+    if (error) {
+      setNotice(error.message);
+      return;
+    }
+
+    if (!data) {
+      setNotice('Could not open this private chat.');
+      return;
+    }
+
+    setSelectedPerson(person);
+    setActiveConversationId(data);
+  }
+
+  function openGroupChat() {
+    setSelectedPerson(null);
+    setActiveConversationId(LOUNGE);
+  }
+
+  // Send a text message
   async function sendMessage(e) {
     e.preventDefault();
 
-    if (!draft.trim() || !session) return;
-
     const content = draft.trim();
+
+    if (!content || !session) return;
+
     setDraft('');
     setNotice('');
 
     const { data, error } = await supabase
       .from('messages')
       .insert({
-        conversation_id: LOUNGE,
+        conversation_id: activeConversationId,
         sender_id: session.user.id,
         sender_name: currentUsername,
         content
@@ -255,17 +264,21 @@ export default function App() {
       .single();
 
     if (error) {
-      setNotice(error.message);
       setDraft(content);
-    } else if (data) {
-      setMessages(prev =>
-        prev.some(m => m.id === data.id)
-          ? prev
-          : [...prev, data]
+      setNotice(error.message);
+      return;
+    }
+
+    if (data) {
+      setMessages(previous =>
+        previous.some(m => m.id === data.id)
+          ? previous
+          : [...previous, data]
       );
     }
   }
 
+  // Upload an image or audio file
   async function uploadFile(file) {
     if (!file || !session) return;
 
@@ -276,8 +289,8 @@ export default function App() {
 
     setNotice('');
 
-    const path =
-      `${session.user.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+    const path = `${session.user.id}/${Date.now()}-${safeName}`;
 
     const { error: uploadError } = await supabase.storage
       .from('chat-media')
@@ -288,17 +301,17 @@ export default function App() {
       return;
     }
 
-    const { data } = supabase.storage
+    const { data: urlData } = supabase.storage
       .from('chat-media')
       .getPublicUrl(path);
 
-    const { data: message, error } = await supabase
+    const { data, error } = await supabase
       .from('messages')
       .insert({
-        conversation_id: LOUNGE,
+        conversation_id: activeConversationId,
         sender_id: session.user.id,
         sender_name: currentUsername,
-        media_url: data.publicUrl,
+        media_url: urlData.publicUrl,
         media_type: file.type.startsWith('image/') ? 'image' : 'audio'
       })
       .select()
@@ -306,51 +319,25 @@ export default function App() {
 
     if (error) {
       setNotice(error.message);
-    } else if (message) {
-      setMessages(prev =>
-        prev.some(m => m.id === message.id)
-          ? prev
-          : [...prev, message]
+    } else if (data) {
+      setMessages(previous =>
+        previous.some(m => m.id === data.id)
+          ? previous
+          : [...previous, data]
       );
-    }
-
-    const fileInput = document.querySelector('.attach input');
-    if (fileInput) fileInput.value = '';
-  }
-
-  async function toggleCamera() {
-    if (cameraOn) {
-      videoRef.current?.srcObject?.getTracks().forEach(track => track.stop());
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
-
-      setCameraOn(false);
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: true,
-        audio: true
-      });
-
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        await videoRef.current.play();
-      }
-
-      setCameraOn(true);
-      setNotice(
-        'Camera preview is local only. Video calling is not configured yet.'
-      );
-    } catch {
-      setNotice('Camera or microphone permission was not granted.');
     }
   }
 
-  if (!supabaseReady) return <SetupScreen />;
+  if (!supabaseReady) {
+    return (
+      <main className="auth-wrap">
+        <section className="auth-card">
+          <h1>Vibely setup needed</h1>
+          <p>Check your Supabase project settings.</p>
+        </section>
+      </main>
+    );
+  }
 
   if (!session) {
     return (
@@ -376,14 +363,12 @@ export default function App() {
             <label>
               Username
               <input
-                type="text"
                 required
                 minLength="3"
                 maxLength="20"
                 value={username}
                 onChange={e => setUsername(e.target.value)}
-                placeholder="Enter your username"
-                autoComplete="username"
+                placeholder="Enter username"
               />
             </label>
 
@@ -396,25 +381,16 @@ export default function App() {
                 value={password}
                 onChange={e => setPassword(e.target.value)}
                 placeholder="At least 6 characters"
-                autoComplete={
-                  mode === 'login' ? 'current-password' : 'new-password'
-                }
               />
             </label>
 
             <button className="primary full" disabled={busy}>
-              {busy
-                ? 'Please wait…'
-                : mode === 'login'
-                  ? 'Sign in'
-                  : 'Create account'}
+              {busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
             </button>
           </form>
 
           <p className="switch">
-            {mode === 'login'
-              ? 'New to Vibely?'
-              : 'Already have an account?'}
+            {mode === 'login' ? 'New to Vibely?' : 'Already have an account?'}
             {' '}
             <button
               type="button"
@@ -433,7 +409,10 @@ export default function App() {
     );
   }
 
-  const displayName = currentUsername;
+  const visiblePeople = profiles.filter(person =>
+    person.id !== session.user.id &&
+    (person.username || '').toLowerCase().includes(search.toLowerCase())
+  );
 
   return (
     <main className="app-shell">
@@ -446,132 +425,172 @@ export default function App() {
 
         <div className="profile-mini">
           <div className="avatar">
-            {displayName[0].toUpperCase()}
+            {currentUsername[0].toUpperCase()}
           </div>
           <div>
-            <b>{displayName}</b>
+            <b>{currentUsername}</b>
             <small>Available</small>
           </div>
-          <button
-            title="Sign out"
-            onClick={() => supabase.auth.signOut()}
-          >
+          <button title="Sign out" onClick={() => supabase.auth.signOut()}>
             <LogOut size={17} />
           </button>
         </div>
 
         <div className="side-label">MESSAGES</div>
-        <div className="nav-item active">
-          <MessageCircle size={18} />
-          Public lounge
-          <span className="live-dot" />
-        </div>
 
-        <div className="side-label">YOUR SPACE</div>
-        <div className="nav-item">
+        <button
+          className={`nav-item ${!selectedPerson ? 'active' : ''}`}
+          onClick={openGroupChat}
+        >
           <Users size={18} />
-          Groups
-          <span className="soon">Soon</span>
+          Public lounge
+        </button>
+
+        <div className="side-label">PRIVATE CHAT</div>
+
+        <div className="people-search">
+          <Search size={16} />
+          <input
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Find people..."
+          />
         </div>
 
-        <div className="nav-item">
-          <Video size={18} />
-          Video calls
-          <span className="soon">Preview</span>
+        <div className="people-list">
+          {visiblePeople.map(person => (
+            <button
+              key={person.id}
+              className={`person-item ${
+                selectedPerson?.id === person.id ? 'active' : ''
+              }`}
+              onClick={() => openPrivateChat(person)}
+              disabled={loadingChat}
+            >
+              <div className="avatar small">
+                {(person.username || 'U')[0].toUpperCase()}
+              </div>
+              <span>{person.username || 'Vibely member'}</span>
+              <MessageCircle size={15} />
+            </button>
+          ))}
+
+          {visiblePeople.length === 0 && (
+            <p className="muted people-empty">
+              No other users found yet.
+            </p>
+          )}
         </div>
 
         <div className="side-bottom">
-          <div className="online">
-            <span className="live-dot" />
-            {online} online now
-          </div>
           <small>Vibely · Find your vibe.</small>
         </div>
       </aside>
 
       <section className="chat-panel">
         <header className="chat-header">
-          <div className="channel-icon"><Users /></div>
+          <div className="channel-icon">
+            {selectedPerson ? <UserRound /> : <Users />}
+          </div>
+
           <div>
-            <h2>Public lounge</h2>
+            <h2>
+              {selectedPerson
+                ? selectedPerson.username
+                : 'Public lounge'}
+            </h2>
             <p>
-              <span className="live-dot" />
-              {online} people online · Say hello to everyone
+              {selectedPerson
+                ? 'Private conversation'
+                : 'Chat with everyone'}
             </p>
           </div>
-          <div className="header-actions">
-            <button title="Search"><Search /></button>
-            <button title="Video preview" onClick={toggleCamera}>
-              <Video />
+
+          {selectedPerson && (
+            <button className="back-button" onClick={openGroupChat}>
+              <ArrowLeft size={18} />
+              Group
             </button>
-          </div>
+          )}
         </header>
 
-        {cameraOn && (
-          <div className="camera-preview">
-            <video ref={videoRef} muted playsInline />
-            <span>Local camera preview · Not a live call</span>
-          </div>
-        )}
-
         <div className="messages">
-          <div className="welcome">
-            <div className="welcome-icon">✦</div>
-            <h2>Welcome to the lounge</h2>
-            <p>
-              This is your shared space. Start a conversation and make someone’s day.
-            </p>
-          </div>
+          {!selectedPerson && (
+            <div className="welcome">
+              <div className="welcome-icon">✦</div>
+              <h2>Welcome to the lounge</h2>
+              <p>
+                This is your shared space. Start a conversation and make someone's day.
+              </p>
+            </div>
+          )}
 
-          {messages.map(m => {
-            const messageUsername =
-              m.sender_id === session.user.id
-                ? currentUsername
-                : (
-                    profiles[m.sender_id] ||
-                    m.sender_name ||
-                    'Vibely member'
-                  );
+          {selectedPerson && (
+            <div className="private-heading">
+              <div className="avatar">
+                {(selectedPerson.username || 'U')[0].toUpperCase()}
+              </div>
+              <h3>{selectedPerson.username}</h3>
+              <p>Your private conversation</p>
+            </div>
+          )}
+
+          {messages.map(message => {
+            const isMine = message.sender_id === session.user.id;
+
+            const senderName = isMine
+              ? currentUsername
+              : (
+                  profiles.find(p => p.id === message.sender_id)?.username ||
+                  message.sender_name ||
+                  'Vibely member'
+                );
 
             return (
               <article
-                className={`message ${m.sender_id === session.user.id ? 'mine' : ''}`}
-                key={m.id}
+                className={`message ${isMine ? 'mine' : ''}`}
+                key={message.id}
               >
                 <div className="avatar small">
-                  {messageUsername[0].toUpperCase()}
+                  {senderName[0].toUpperCase()}
                 </div>
 
                 <div className="bubble-wrap">
                   <div className="message-meta">
-                    <b>{messageUsername}</b>
+                    <b>{senderName}</b>
                     <time>
-                      {new Date(m.created_at).toLocaleTimeString([], {
+                      {new Date(message.created_at).toLocaleTimeString([], {
                         hour: '2-digit',
                         minute: '2-digit'
                       })}
                     </time>
                   </div>
 
-                  {m.content && (
-                    <div className="bubble">{m.content}</div>
+                  {message.content && (
+                    <div className="bubble">{message.content}</div>
                   )}
 
-                  {m.media_type === 'image' && (
+                  {message.media_type === 'image' && (
                     <img
                       className="shared-image"
-                      src={m.media_url}
-                      alt="Shared attachment"
+                      src={message.media_url}
+                      alt="Shared image"
                     />
                   )}
 
-                  {m.media_type === 'audio' && (
-                    <audio controls src={m.media_url} />
+                  {message.media_type === 'audio' && (
+                    <audio controls src={message.media_url} />
                   )}
                 </div>
               </article>
             );
           })}
+
+          {messages.length === 0 && selectedPerson && (
+            <p className="muted empty-chat">
+              No messages yet. Say hello!
+            </p>
+          )}
 
           <div ref={bottom} />
         </div>
@@ -582,7 +601,10 @@ export default function App() {
             <input
               type="file"
               accept="image/*,audio/*"
-              onChange={e => uploadFile(e.target.files?.[0])}
+              onChange={e => {
+                uploadFile(e.target.files?.[0]);
+                e.target.value = '';
+              }}
             />
           </label>
 
@@ -590,12 +612,12 @@ export default function App() {
             className="message-input"
             value={draft}
             onChange={e => setDraft(e.target.value)}
-            placeholder="Write a message…"
+            placeholder={
+              selectedPerson
+                ? `Message ${selectedPerson.username}...`
+                : 'Write a message...'
+            }
           />
-
-          <button type="button" className="icon-btn" title="Emoji">
-            <Smile />
-          </button>
 
           <button
             type="submit"
@@ -607,12 +629,7 @@ export default function App() {
         </form>
 
         {notice && (
-          <div
-            className="toast"
-            onClick={() => setNotice('')}
-            role="button"
-            tabIndex={0}
-          >
+          <div className="toast" onClick={() => setNotice('')}>
             {notice} <b>×</b>
           </div>
         )}
@@ -621,33 +638,6 @@ export default function App() {
           Be kind. Keep it friendly.
           <span>Powered by Vibely</span>
         </footer>
-      </section>
-    </main>
-  );
-}
-
-function SetupScreen() {
-  return (
-    <main className="auth-wrap">
-      <section className="auth-card">
-        <div className="brand-mark">v</div>
-        <p className="eyebrow">ONE LAST SETUP STEP</p>
-        <h1>Connect <span>Vibely</span></h1>
-        <p className="muted">
-          Add your Supabase project details to start chatting.
-        </p>
-        <div className="setup-steps">
-          <p>
-            <b>1.</b> Copy <code>.env.example</code> and rename the copy to <code>.env</code>.
-          </p>
-          <p>
-            <b>2.</b> Add your Supabase Project URL and Publishable Key.
-          </p>
-          <p><b>3.</b> Save the file and restart the dev server.</p>
-        </div>
-        <p className="muted tiny">
-          Never put a Supabase Secret key in this file.
-        </p>
       </section>
     </main>
   );
