@@ -1259,3 +1259,62 @@ button:focus-visible, input:focus-visible {
     max-height: 92dvh;
   }
 }
+/* FIX: CHAT PANEL POSITION */
+
+.app-shell {
+  display: block !important;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  max-height: none;
+}
+
+.app-shell-content {
+  display: grid;
+  grid-template-columns: 290px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.app-shell-content > .sidebar,
+.app-shell-content > .chat-panel {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+}
+
+@media (max-width: 900px) {
+  .app-shell-content {
+    grid-template-columns: 245px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 700px) {
+  .app-shell-content {
+    position: relative;
+    display: block;
+  }
+
+  .app-shell-content > .sidebar {
+    position: absolute !important;
+    z-index: 50;
+    inset: 0 auto 0 0;
+    width: min(300px, 85vw) !important;
+    height: 100%;
+    transform: translateX(-110%);
+    transition: transform .25s ease;
+  }
+
+  .app-shell-content.mobile-sidebar-open > .sidebar {
+    transform: translateX(0);
+  }
+
+  .app-shell-content > .chat-panel {
+    width: 100% !important;
+    height: 100%;
+    min-width: 0 !important;
+  }
+}
