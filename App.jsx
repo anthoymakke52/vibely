@@ -3,10 +3,19 @@ import React, { useEffect, useRef, useState } from 'react';
 import { supabase, supabaseReady } from './supabase';
 import {
   Send, LogOut, Users, MessageCircle, ImagePlus,
-  Search, ArrowLeft, UserRound
+  Search, ArrowLeft, UserRound, Settings, Camera,
+  X, Check, Palette, Sun, Moon
 } from 'lucide-react';
 
 const LOUNGE = '00000000-0000-0000-0000-000000000001';
+
+const ACCENTS = {
+  purple: '#9b7bff',
+  blue: '#438cff',
+  green: '#28c994',
+  pink: '#f06da8',
+  red: '#f06464'
+};
 
 function usernameToEmail(username) {
   return `${username.trim().toLowerCase()}@vibely.invalid`;
@@ -21,6 +30,8 @@ export default function App() {
 
   const [messages, setMessages] = useState([]);
   const [profiles, setProfiles] = useState([]);
+  const [myProfile, setMyProfile] = useState(null);
+
   const [draft, setDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
@@ -30,12 +41,20 @@ export default function App() {
   const [selectedPerson, setSelectedPerson] = useState(null);
   const [loadingChat, setLoadingChat] = useState(false);
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [theme, setTheme] = useState('dark');
+  const [accent, setAccent] = useState('purple');
+  const [avatarBusy, setAvatarBusy] = useState(false);
+
   const bottom = useRef(null);
+  const avatarInput = useRef(null);
 
   const currentUsername =
     session?.user?.user_metadata?.username ||
     session?.user?.email?.split('@')[0] ||
     'User';
+
+  const currentAvatar = myProfile?.avatar_url || '';
 
   // Authentication
   useEffect(() => {
@@ -55,22 +74,35 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Load all public user profiles
+  // Load user profiles and saved customization
   useEffect(() => {
     if (!session) return;
+
+    let alive = true;
 
     async function loadProfiles() {
       const { data, error } = await supabase
         .from('profiles')
-        .select('id, username')
+        .select('id, username, avatar_url, theme, accent_color')
         .order('username');
+
+      if (!alive) return;
 
       if (error) {
         setNotice(error.message);
         return;
       }
 
-      setProfiles(data || []);
+      const list = data || [];
+      setProfiles(list);
+
+      const mine = list.find(p => p.id === session.user.id);
+
+      if (mine) {
+        setMyProfile(mine);
+        setTheme(mine.theme || 'dark');
+        setAccent(mine.accent_color || 'purple');
+      }
     }
 
     loadProfiles();
@@ -89,11 +121,12 @@ export default function App() {
       .subscribe();
 
     return () => {
+      alive = false;
       supabase.removeChannel(profileChannel);
     };
   }, [session]);
 
-  // Load messages for the selected conversation
+  // Load messages
   useEffect(() => {
     if (!session || !activeConversationId) return;
 
@@ -153,7 +186,91 @@ export default function App() {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Login and signup
+  // Save theme or accent color
+  async function updateCustomization(field, value) {
+    if (field === 'theme') setTheme(value);
+    if (field === 'accent_color') setAccent(value);
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update({ [field]: value })
+      .eq('id', session.user.id)
+      .select()
+      .single();
+
+    if (error) {
+      setNotice(error.message);
+      return;
+    }
+
+    if (data) {
+      setMyProfile(data);
+      setProfiles(previous =>
+        previous.map(p => p.id === data.id ? data : p)
+      );
+    }
+  }
+
+  // Upload profile avatar
+  async function uploadAvatar(file) {
+    if (!file || !session) return;
+
+    if (!file.type.startsWith('image/')) {
+      setNotice('Please choose an image file.');
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      setNotice('Avatar image must be smaller than 5 MB.');
+      return;
+    }
+
+    setAvatarBusy(true);
+    setNotice('');
+
+    const extension = file.name.split('.').pop()?.toLowerCase() || 'jpg';
+    const path = `${session.user.id}/avatar.${extension}`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('vibely-avatars')
+      .upload(path, file, {
+        upsert: true,
+        contentType: file.type
+      });
+
+    if (uploadError) {
+      setNotice(uploadError.message);
+      setAvatarBusy(false);
+      return;
+    }
+
+    const { data: urlData } = supabase.storage
+      .from('vibely-avatars')
+      .getPublicUrl(path);
+
+    const avatarUrl = `${urlData.publicUrl}?t=${Date.now()}`;
+
+    const { data, error } = await supabase
+      .from('profiles')
+      .update({ avatar_url: avatarUrl })
+      .eq('id', session.user.id)
+      .select()
+      .single();
+
+    if (error) {
+      setNotice(error.message);
+    } else if (data) {
+      setMyProfile(data);
+      setProfiles(previous =>
+        previous.map(p => p.id === data.id ? data : p)
+      );
+      setNotice('Your avatar has been updated!');
+    }
+
+    setAvatarBusy(false);
+  }
+
+  // Authentication
   async function authenticate(e) {
     e.preventDefault();
     setBusy(true);
@@ -208,7 +325,7 @@ export default function App() {
     }
   }
 
-  // Open a private conversation with another user
+  // Open private chat
   async function openPrivateChat(person) {
     if (!session || !person || person.id === session.user.id) return;
 
@@ -241,12 +358,11 @@ export default function App() {
     setActiveConversationId(LOUNGE);
   }
 
-  // Send a text message
+  // Send message
   async function sendMessage(e) {
     e.preventDefault();
 
     const content = draft.trim();
-
     if (!content || !session) return;
 
     setDraft('');
@@ -278,7 +394,7 @@ export default function App() {
     }
   }
 
-  // Upload an image or audio file
+  // Upload chat image or audio
   async function uploadFile(file) {
     if (!file || !session) return;
 
@@ -326,6 +442,32 @@ export default function App() {
           : [...previous, data]
       );
     }
+  }
+
+  // Avatar display helper
+  function Avatar({ profile, label, size = 'small' }) {
+    const avatarUrl = profile?.avatar_url;
+
+    if (avatarUrl) {
+      return (
+        <img
+          className={`avatar ${size}`}
+          src={avatarUrl}
+          alt={`${label || 'User'} avatar`}
+        />
+      );
+    }
+
+    return (
+      <div
+        className={`avatar ${size}`}
+        style={{
+          background: `linear-gradient(135deg, ${ACCENTS[accent]}, #5141a8)`
+        }}
+      >
+        {(label || 'U')[0].toUpperCase()}
+      </div>
+    );
   }
 
   if (!supabaseReady) {
@@ -415,7 +557,166 @@ export default function App() {
   );
 
   return (
-    <main className="app-shell">
+    <main
+      className="app-shell"
+      data-theme={theme}
+      style={{ '--vibely-accent': ACCENTS[accent] || ACCENTS.purple }}
+    >
+      <style>{`
+        .app-shell[data-theme="light"] {
+          background: #edf1fa !important;
+          color: #202438 !important;
+        }
+        .app-shell[data-theme="light"] .sidebar,
+        .app-shell[data-theme="light"] .chat-panel {
+          background: rgba(255,255,255,.94) !important;
+          color: #202438 !important;
+          border-color: #dce2ef !important;
+        }
+        .app-shell[data-theme="light"] .chat-header,
+        .app-shell[data-theme="light"] .composer {
+          background: rgba(255,255,255,.96) !important;
+          border-color: #dce2ef !important;
+        }
+        .app-shell[data-theme="light"] .message-input,
+        .app-shell[data-theme="light"] .people-search input {
+          color: #202438 !important;
+        }
+        .app-shell[data-theme="light"] .bubble {
+          background: #e8ebf5 !important;
+          color: #202438 !important;
+        }
+        .app-shell[data-theme="light"] .message.mine .bubble {
+          background: var(--vibely-accent) !important;
+          color: white !important;
+        }
+        .app-shell[data-theme="light"] .side-label,
+        .app-shell[data-theme="light"] .muted,
+        .app-shell[data-theme="light"] .chat-header p {
+          color: #737b91 !important;
+        }
+        .app-shell button.primary,
+        .app-shell .send-btn,
+        .app-shell .nav-item.active {
+          background: var(--vibely-accent) !important;
+        }
+        .avatar {
+          object-fit: cover;
+          flex-shrink: 0;
+        }
+        .settings-button {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          width: 100%;
+          padding: 11px 13px;
+          margin: 10px 0;
+          border: 1px solid rgba(150,150,180,.2);
+          border-radius: 12px;
+          background: rgba(150,150,180,.08);
+          color: inherit;
+          cursor: pointer;
+          font: inherit;
+        }
+        .settings-overlay {
+          position: fixed;
+          inset: 0;
+          z-index: 1000;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 18px;
+          background: rgba(5,8,18,.7);
+          backdrop-filter: blur(9px);
+        }
+        .settings-card {
+          width: min(430px, 100%);
+          max-height: 90vh;
+          overflow-y: auto;
+          padding: 24px;
+          border: 1px solid rgba(150,150,180,.25);
+          border-radius: 22px;
+          background: ${theme === 'light' ? '#fff' : '#191b2b'};
+          color: ${theme === 'light' ? '#202438' : '#fff'};
+          box-shadow: 0 25px 80px rgba(0,0,0,.35);
+        }
+        .settings-top {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 22px;
+        }
+        .settings-top h2 { margin: 0; font-size: 21px; }
+        .settings-close {
+          border: 0;
+          background: transparent;
+          color: inherit;
+          cursor: pointer;
+        }
+        .settings-section { margin: 22px 0; }
+        .settings-section h3 {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          margin: 0 0 12px;
+          font-size: 14px;
+        }
+        .avatar-preview {
+          display: flex;
+          align-items: center;
+          gap: 15px;
+        }
+        .avatar-preview .avatar {
+          width: 68px;
+          height: 68px;
+          border-radius: 50%;
+          font-size: 25px;
+        }
+        .upload-avatar {
+          padding: 10px 14px;
+          border: 0;
+          border-radius: 10px;
+          background: var(--vibely-accent);
+          color: white;
+          cursor: pointer;
+          font: inherit;
+        }
+        .settings-options {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 9px;
+        }
+        .theme-option {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 7px;
+          padding: 10px 13px;
+          border: 1px solid rgba(150,150,180,.3);
+          border-radius: 11px;
+          background: rgba(150,150,180,.08);
+          color: inherit;
+          cursor: pointer;
+          font: inherit;
+        }
+        .theme-option.selected {
+          border: 2px solid var(--vibely-accent);
+          background: rgba(150,150,180,.15);
+        }
+        .color-dot {
+          width: 21px;
+          height: 21px;
+          border-radius: 50%;
+          border: 2px solid rgba(255,255,255,.5);
+        }
+        .settings-note {
+          margin-top: 16px;
+          font-size: 12px;
+          opacity: .65;
+        }
+      `}</style>
+
       <aside className="sidebar">
         <div className="brand">
           <div className="brand-mark">v</div>
@@ -424,9 +725,7 @@ export default function App() {
         </div>
 
         <div className="profile-mini">
-          <div className="avatar">
-            {currentUsername[0].toUpperCase()}
-          </div>
+          <Avatar profile={myProfile} label={currentUsername} />
           <div>
             <b>{currentUsername}</b>
             <small>Available</small>
@@ -435,6 +734,14 @@ export default function App() {
             <LogOut size={17} />
           </button>
         </div>
+
+        <button
+          className="settings-button"
+          onClick={() => setSettingsOpen(true)}
+        >
+          <Settings size={17} />
+          Profile & Appearance
+        </button>
 
         <div className="side-label">MESSAGES</div>
 
@@ -467,9 +774,7 @@ export default function App() {
               onClick={() => openPrivateChat(person)}
               disabled={loadingChat}
             >
-              <div className="avatar small">
-                {(person.username || 'U')[0].toUpperCase()}
-              </div>
+              <Avatar profile={person} label={person.username || 'U'} />
               <span>{person.username || 'Vibely member'}</span>
               <MessageCircle size={15} />
             </button>
@@ -527,9 +832,10 @@ export default function App() {
 
           {selectedPerson && (
             <div className="private-heading">
-              <div className="avatar">
-                {(selectedPerson.username || 'U')[0].toUpperCase()}
-              </div>
+              <Avatar
+                profile={selectedPerson}
+                label={selectedPerson.username}
+              />
               <h3>{selectedPerson.username}</h3>
               <p>Your private conversation</p>
             </div>
@@ -538,10 +844,14 @@ export default function App() {
           {messages.map(message => {
             const isMine = message.sender_id === session.user.id;
 
+            const senderProfile = profiles.find(
+              p => p.id === message.sender_id
+            );
+
             const senderName = isMine
               ? currentUsername
               : (
-                  profiles.find(p => p.id === message.sender_id)?.username ||
+                  senderProfile?.username ||
                   message.sender_name ||
                   'Vibely member'
                 );
@@ -551,9 +861,10 @@ export default function App() {
                 className={`message ${isMine ? 'mine' : ''}`}
                 key={message.id}
               >
-                <div className="avatar small">
-                  {senderName[0].toUpperCase()}
-                </div>
+                <Avatar
+                  profile={isMine ? myProfile : senderProfile}
+                  label={senderName}
+                />
 
                 <div className="bubble-wrap">
                   <div className="message-meta">
@@ -639,6 +950,115 @@ export default function App() {
           <span>Powered by Vibely</span>
         </footer>
       </section>
+
+      {settingsOpen && (
+        <div
+          className="settings-overlay"
+          onClick={e => {
+            if (e.target === e.currentTarget) setSettingsOpen(false);
+          }}
+        >
+          <section className="settings-card">
+            <div className="settings-top">
+              <h2>Profile & Appearance</h2>
+              <button
+                className="settings-close"
+                onClick={() => setSettingsOpen(false)}
+              >
+                <X size={21} />
+              </button>
+            </div>
+
+            <div className="settings-section">
+              <h3><UserRound size={17} /> Your Avatar</h3>
+
+              <div className="avatar-preview">
+                <Avatar
+                  profile={myProfile}
+                  label={currentUsername}
+                  size="large"
+                />
+
+                <div>
+                  <b>{currentUsername}</b>
+                  <p className="muted" style={{ margin: '5px 0 9px' }}>
+                    Choose your profile picture
+                  </p>
+
+                  <button
+                    className="upload-avatar"
+                    onClick={() => avatarInput.current?.click()}
+                    disabled={avatarBusy}
+                  >
+                    <Camera size={15} style={{ verticalAlign: 'middle' }} />
+                    {' '}
+                    {avatarBusy ? 'Uploading...' : 'Upload Photo'}
+                  </button>
+
+                  <input
+                    ref={avatarInput}
+                    type="file"
+                    accept="image/*"
+                    hidden
+                    onChange={e => {
+                      uploadAvatar(e.target.files?.[0]);
+                      e.target.value = '';
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <h3><Palette size={17} /> Choose Theme</h3>
+
+              <div className="settings-options">
+                <button
+                  className={`theme-option ${theme === 'dark' ? 'selected' : ''}`}
+                  onClick={() => updateCustomization('theme', 'dark')}
+                >
+                  <Moon size={17} /> Dark
+                  {theme === 'dark' && <Check size={15} />}
+                </button>
+
+                <button
+                  className={`theme-option ${theme === 'light' ? 'selected' : ''}`}
+                  onClick={() => updateCustomization('theme', 'light')}
+                >
+                  <Sun size={17} /> Light
+                  {theme === 'light' && <Check size={15} />}
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <h3><Palette size={17} /> Accent Color</h3>
+
+              <div className="settings-options">
+                {Object.entries(ACCENTS).map(([key, color]) => (
+                  <button
+                    key={key}
+                    className={`theme-option ${accent === key ? 'selected' : ''}`}
+                    onClick={() => updateCustomization('accent_color', key)}
+                    title={key}
+                  >
+                    <span
+                      className="color-dot"
+                      style={{ background: color }}
+                    />
+                    {key[0].toUpperCase() + key.slice(1)}
+                    {accent === key && <Check size={14} />}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <p className="settings-note">
+              Your appearance preferences are saved to your Vibely account.
+            </p>
+          </section>
+        </div>
+      )}
     </main>
   );
 }
