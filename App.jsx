@@ -4,7 +4,8 @@ import {
   Send, LogOut, Users, MessageCircle, ImagePlus,
   Search, ArrowLeft, UserRound, Settings, Camera,
   X, Check, Palette, Sun, Moon, Pencil, Trash2,
-  Smile, Bell, BellRing, Menu, Circle
+  Smile, Bell, BellRing, Menu, Circle, Reply,
+  Forward
 } from 'lucide-react';
 
 const LOUNGE = '00000000-0000-0000-0000-000000000001';
@@ -17,7 +18,6 @@ const ACCENTS = {
   red: '#f06464'
 };
 
-// Full emoji reaction collection
 const REACTIONS = [
   '👍', '❤️', '😂', '😮', '😢', '🙏', '🔥', '🎉',
   '😍', '🥰', '👏', '💯', '🤔', '😎', '😭', '🤣',
@@ -64,6 +64,8 @@ export default function App() {
   const [readReceipts, setReadReceipts] = useState({});
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
 
+  const [replyingTo, setReplyingTo] = useState(null);
+
   const [notificationPermission, setNotificationPermission] = useState(
     typeof window !== 'undefined' && 'Notification' in window
       ? Notification.permission
@@ -81,7 +83,10 @@ export default function App() {
     'User';
 
   const currentDisplayName =
-    myProfile?.display_name || currentUsername;
+    myProfile?.display_name?.trim() ||
+    myProfile?.username?.trim() ||
+    session?.user?.user_metadata?.display_name?.trim() ||
+    currentUsername;
 
   const currentAvatar = myProfile?.avatar_url || '';
 
@@ -129,12 +134,22 @@ export default function App() {
 
       const mine = list.find(profile => profile.id === session.user.id);
 
-      if (mine) {
-        setMyProfile(mine);
-        setTheme(mine.theme || 'dark');
-        setAccent(mine.accent_color || 'purple');
-        setDisplayName(mine.display_name || mine.username || '');
-      }
+      const myData = mine || {
+        id: session.user.id,
+        username: currentUsername,
+        display_name:
+          session.user.user_metadata?.display_name || currentUsername,
+        avatar_url: '',
+        theme: 'dark',
+        accent_color: 'purple'
+      };
+
+      setMyProfile(myData);
+      setTheme(myData.theme || 'dark');
+      setAccent(myData.accent_color || 'purple');
+      setDisplayName(
+        myData.display_name || myData.username || currentUsername
+      );
     }
 
     loadProfiles();
@@ -152,7 +167,7 @@ export default function App() {
       alive = false;
       supabase.removeChannel(profileChannel);
     };
-  }, [session]);
+  }, [session, currentUsername]);
 
   // Online presence
   useEffect(() => {
@@ -217,8 +232,10 @@ export default function App() {
         return;
       }
 
-      const [{ data: reactionData, error: reactionError },
-        { data: readData, error: readError }] = await Promise.all([
+      const [
+        { data: reactionData, error: reactionError },
+        { data: readData, error: readError }
+      ] = await Promise.all([
         supabase
           .from('message_reactions')
           .select('*')
@@ -265,6 +282,7 @@ export default function App() {
       setMessages([]);
       setReactions({});
       setReadReceipts({});
+      setReplyingTo(null);
 
       const { data, error } = await supabase
         .from('messages')
@@ -291,7 +309,6 @@ export default function App() {
 
       if (!alive || !ids.length) return;
 
-      // Mark incoming messages as read
       const { data: existingReads, error: readsError } = await supabase
         .from('message_reads')
         .select('message_id, user_id')
@@ -721,12 +738,20 @@ export default function App() {
     setMobileSidebarOpen(false);
   }
 
-  // Send text message
+  // Reply to a message
+  function startReply(message) {
+    if (message.deleted_at) return;
+    setReplyingTo(message);
+  }
+
+  // Send text message, optionally as a reply
   async function sendMessage(e) {
     e.preventDefault();
 
     const content = draft.trim();
     if (!content || !session) return;
+
+    const replyId = replyingTo?.id || null;
 
     setDraft('');
     setNotice('');
@@ -737,7 +762,8 @@ export default function App() {
         conversation_id: activeConversationId,
         sender_id: session.user.id,
         sender_name: currentDisplayName,
-        content
+        content,
+        reply_to_message_id: replyId
       })
       .select()
       .single();
@@ -756,6 +782,8 @@ export default function App() {
       );
     }
 
+    setReplyingTo(null);
+
     typingChannel.current?.send({
       type: 'broadcast',
       event: 'typing',
@@ -767,7 +795,84 @@ export default function App() {
     });
   }
 
-  // Upload image or audio
+  // Forward a message to the lounge or a private chat
+  async function forwardMessage(message) {
+    if (!session || message.deleted_at) return;
+
+    const targets = [
+      { label: 'Public Lounge', conversationId: LOUNGE }
+    ];
+
+    profiles
+      .filter(profile => profile.id !== session.user.id)
+      .forEach(profile => {
+        targets.push({
+          label:
+            profile.display_name ||
+            profile.username ||
+            'Vibely member',
+          person: profile
+        });
+      });
+
+    const choice = window.prompt(
+      'Forward to:\n\n' +
+      targets.map((target, index) =>
+        `${index}: ${target.label}`
+      ).join('\n') +
+      '\n\nEnter the destination number:'
+    );
+
+    if (choice === null) return;
+
+    const index = Number(choice);
+
+    if (
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= targets.length
+    ) {
+      setNotice('Invalid destination.');
+      return;
+    }
+
+    let conversationId = targets[index].conversationId;
+
+    if (targets[index].person) {
+      const { data, error } = await supabase.rpc(
+        'open_private_chat',
+        { target_user: targets[index].person.id }
+      );
+
+      if (error || !data) {
+        setNotice(error?.message || 'Could not open destination chat.');
+        return;
+      }
+
+      conversationId = data;
+    }
+
+    const { error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: conversationId,
+        sender_id: session.user.id,
+        sender_name: currentDisplayName,
+        content: message.content || '',
+        media_url: message.media_url || null,
+        media_type: message.media_type || null,
+        forwarded_from_message_id: message.id
+      });
+
+    if (error) {
+      setNotice(error.message);
+      return;
+    }
+
+    setNotice(`Message forwarded to ${targets[index].label}.`);
+  }
+
+  // Upload image or audio, optionally as a reply
   async function uploadFile(file) {
     if (!file || !session) return;
 
@@ -813,7 +918,8 @@ export default function App() {
         sender_id: session.user.id,
         sender_name: currentDisplayName,
         media_url: urlData.publicUrl,
-        media_type: file.type.startsWith('image/') ? 'image' : 'audio'
+        media_type: file.type.startsWith('image/') ? 'image' : 'audio',
+        reply_to_message_id: replyingTo?.id || null
       })
       .select()
       .single();
@@ -826,6 +932,7 @@ export default function App() {
           ? previous
           : [...previous, data]
       );
+      setReplyingTo(null);
     }
 
     setBusy(false);
@@ -875,7 +982,7 @@ export default function App() {
     if (error) setNotice(error.message);
   }
 
-  // Toggle reaction: add or remove the selected emoji
+  // Toggle reaction
   async function toggleReaction(messageId, reaction) {
     if (!session) return;
 
@@ -1425,6 +1532,56 @@ export default function App() {
           font-style: italic;
         }
 
+        .reply-preview,
+        .quoted-message {
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 10px;
+          padding: 9px 12px;
+          margin: 7px 0;
+          border-left: 3px solid var(--vibely-accent);
+          border-radius: 8px;
+          background: rgba(150,150,180,.12);
+          font-size: 12px;
+        }
+
+        .quoted-message {
+          display: block;
+          max-width: 100%;
+          margin-bottom: 8px;
+          cursor: default;
+        }
+
+        .quoted-message b {
+          display: block;
+          margin-bottom: 4px;
+          color: var(--vibely-accent);
+        }
+
+        .quoted-message p,
+        .reply-preview p {
+          margin: 0;
+          opacity: .75;
+          overflow-wrap: anywhere;
+        }
+
+        .reply-preview button {
+          border: 0;
+          background: transparent;
+          color: inherit;
+          cursor: pointer;
+        }
+
+        .forwarded-label {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          margin-bottom: 5px;
+          font-size: 11px;
+          opacity: .7;
+        }
+
         @media (max-width: 700px) {
           .mobile-menu-button {
             display: inline-flex;
@@ -1445,7 +1602,6 @@ export default function App() {
             box-shadow: 15px 0 40px rgba(0,0,0,.25);
           }
 
-          /* Fixed: mobile-sidebar-open is on app-shell-content */
           .app-shell-content.mobile-sidebar-open .sidebar {
             transform: translateX(0);
           }
@@ -1553,6 +1709,10 @@ export default function App() {
           <div className="people-list">
             {visiblePeople.map(person => {
               const isOnline = onlineUsers.includes(person.id);
+              const personName =
+                person.display_name?.trim() ||
+                person.username?.trim() ||
+                'Vibely member';
 
               return (
                 <button
@@ -1563,13 +1723,10 @@ export default function App() {
                   onClick={() => openPrivateChat(person)}
                   disabled={loadingChat}
                 >
-                  <Avatar
-                    profile={person}
-                    label={person.display_name || person.username}
-                  />
+                  <Avatar profile={person} label={personName} />
 
                   <span>
-                    {person.display_name || person.username || 'Vibely member'}
+                    {personName}
                     <small style={{ display: 'block', opacity: .65 }}>
                       {isOnline ? 'Online' : 'Offline'}
                     </small>
@@ -1611,7 +1768,11 @@ export default function App() {
             <div>
               <h2>
                 {selectedPerson
-                  ? (selectedPerson.display_name || selectedPerson.username)
+                  ? (
+                    selectedPerson.display_name?.trim() ||
+                    selectedPerson.username?.trim() ||
+                    'Vibely member'
+                  )
                   : 'Public lounge'}
               </h2>
 
@@ -1647,10 +1808,16 @@ export default function App() {
               <div className="private-heading">
                 <Avatar
                   profile={selectedPerson}
-                  label={selectedPerson.display_name || selectedPerson.username}
+                  label={
+                    selectedPerson.display_name ||
+                    selectedPerson.username ||
+                    'Vibely member'
+                  }
                 />
                 <h3>
-                  {selectedPerson.display_name || selectedPerson.username}
+                  {selectedPerson.display_name ||
+                    selectedPerson.username ||
+                    'Vibely member'}
                 </h3>
                 <p>
                   {onlineUsers.includes(selectedPerson.id) ? 'Online' : 'Offline'}
@@ -1670,8 +1837,8 @@ export default function App() {
               const senderName = isMine
                 ? currentDisplayName
                 : (
-                    senderProfile?.display_name ||
-                    senderProfile?.username ||
+                    senderProfile?.display_name?.trim() ||
+                    senderProfile?.username?.trim() ||
                     message.sender_name ||
                     'Vibely member'
                   );
@@ -1682,6 +1849,12 @@ export default function App() {
               const seenByOthers = messageReads.some(
                 receipt => receipt.user_id !== session.user.id
               );
+
+              const originalMessage = message.reply_to_message_id
+                ? messages.find(
+                    item => item.id === message.reply_to_message_id
+                  )
+                : null;
 
               return (
                 <article
@@ -1715,6 +1888,31 @@ export default function App() {
                       </div>
                     ) : (
                       <>
+                        {message.forwarded_from_message_id && (
+                          <div className="forwarded-label">
+                            <Forward size={13} />
+                            Forwarded
+                          </div>
+                        )}
+
+                        {message.reply_to_message_id && (
+                          <div className="quoted-message">
+                            <b>
+                              <Reply size={12} style={{ verticalAlign: 'middle' }} />
+                              {' '}
+                              {originalMessage?.sender_name || 'Original message'}
+                            </b>
+                            <p>
+                              {originalMessage?.content ||
+                                (originalMessage?.media_type === 'image'
+                                  ? 'Image'
+                                  : originalMessage?.media_type === 'audio'
+                                    ? 'Audio'
+                                    : 'Original message')}
+                            </p>
+                          </div>
+                        )}
+
                         {message.content && (
                           <div className="bubble">{message.content}</div>
                         )}
@@ -1767,7 +1965,24 @@ export default function App() {
                             })}
                           </div>
 
-                          {/* Full emoji reaction picker */}
+                          <button
+                            type="button"
+                            title="Reply to message"
+                            onClick={() => startReply(message)}
+                            disabled={isDeleted}
+                          >
+                            <Reply size={13} /> Reply
+                          </button>
+
+                          <button
+                            type="button"
+                            title="Forward message"
+                            onClick={() => forwardMessage(message)}
+                            disabled={isDeleted}
+                          >
+                            <Forward size={13} /> Forward
+                          </button>
+
                           <details className="reaction-picker">
                             <summary title="Choose an emoji reaction">
                               <Smile size={14} />
@@ -1841,6 +2056,32 @@ export default function App() {
             </div>
           )}
 
+          {replyingTo && (
+            <div className="reply-preview">
+              <div>
+                <b>
+                  Replying to {replyingTo.sender_name || currentDisplayName}
+                </b>
+                <p>
+                  {replyingTo.content ||
+                    (replyingTo.media_type === 'image'
+                      ? 'Image'
+                      : replyingTo.media_type === 'audio'
+                        ? 'Audio'
+                        : 'Attachment')}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setReplyingTo(null)}
+                aria-label="Cancel reply"
+              >
+                <X size={17} />
+              </button>
+            </div>
+          )}
+
           <form className="composer" onSubmit={sendMessage}>
             <label className="attach" title="Share image or audio">
               <ImagePlus />
@@ -1860,9 +2101,11 @@ export default function App() {
               value={draft}
               onChange={e => handleDraftChange(e.target.value)}
               placeholder={
-                selectedPerson
-                  ? `Message ${selectedPerson.display_name || selectedPerson.username}...`
-                  : 'Write a message...'
+                replyingTo
+                  ? 'Write your reply...'
+                  : selectedPerson
+                    ? `Message ${selectedPerson.display_name || selectedPerson.username}...`
+                    : 'Write a message...'
               }
             />
 
