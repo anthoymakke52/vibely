@@ -19,6 +19,7 @@ export default function App() {
   const [name, setName] = useState('');
   const [mode, setMode] = useState('login');
   const [messages, setMessages] = useState([]);
+  const [profiles, setProfiles] = useState({});
   const [draft, setDraft] = useState('');
   const [notice, setNotice] = useState('');
   const [online, setOnline] = useState(1);
@@ -30,6 +31,7 @@ export default function App() {
 
   const currentUsername =
     session?.user?.user_metadata?.username ||
+    profiles[session?.user?.id] ||
     session?.user?.email?.split('@')[0] ||
     'User';
 
@@ -48,6 +50,69 @@ export default function App() {
     return () => listener.subscription.unsubscribe();
   }, []);
 
+  // Load all usernames and messages for every signed-in user
+  async function loadProfiles() {
+    const { data, error } = await supabase
+      .from('profiles')
+      .select('id, username');
+
+    if (error) {
+      setNotice(error.message);
+      return {};
+    }
+
+    const profileMap = {};
+
+    (data || []).forEach(profile => {
+      profileMap[profile.id] = profile.username;
+    });
+
+    setProfiles(profileMap);
+    return profileMap;
+  }
+
+  async function loadMessages() {
+    const [messageResult, profileResult] = await Promise.all([
+      supabase
+        .from('messages')
+        .select('*')
+        .eq('conversation_id', LOUNGE)
+        .order('created_at')
+        .limit(100),
+
+      supabase
+        .from('profiles')
+        .select('id, username')
+    ]);
+
+    if (messageResult.error) {
+      setNotice(messageResult.error.message);
+      return;
+    }
+
+    let profileMap = {};
+
+    if (profileResult.error) {
+      setNotice(profileResult.error.message);
+    } else {
+      (profileResult.data || []).forEach(profile => {
+        profileMap[profile.id] = profile.username;
+      });
+
+      setProfiles(profileMap);
+    }
+
+    setMessages(
+      (messageResult.data || []).map(message => ({
+        ...message,
+        sender_name:
+          profileMap[message.sender_id] ||
+          message.sender_name ||
+          'Vibely member'
+      }))
+    );
+  }
+
   useEffect(() => {
     if (!session) return;
 
@@ -62,12 +127,30 @@ export default function App() {
           table: 'messages',
           filter: `conversation_id=eq.${LOUNGE}`
         },
-        payload => {
+        async payload => {
+          const newMessage = payload.new;
+
           setMessages(prev =>
-            prev.some(m => m.id === payload.new.id)
+            prev.some(m => m.id === newMessage.id)
               ? prev
-              : [...prev, payload.new]
+              : [...prev, newMessage]
           );
+
+          // Look up the sender's public username
+          if (newMessage.sender_id) {
+            const { data } = await supabase
+              .from('profiles')
+              .select('username')
+              .eq('id', newMessage.sender_id)
+              .maybeSingle();
+
+            if (data?.username) {
+              setProfiles(prev => ({
+                ...prev,
+                [newMessage.sender_id]: data.username
+              }));
+            }
+          }
         }
       )
       .on('presence', { event: 'sync' }, () => {
@@ -90,21 +173,6 @@ export default function App() {
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
-
-  async function loadMessages() {
-    const { data, error } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('conversation_id', LOUNGE)
-      .order('created_at')
-      .limit(100);
-
-    if (error) {
-      setNotice(error.message);
-    } else {
-      setMessages(data || []);
-    }
-  }
 
   async function authenticate(e) {
     e.preventDefault();
@@ -459,7 +527,11 @@ export default function App() {
             const messageUsername =
               m.sender_id === session.user.id
                 ? currentUsername
-                : (m.sender_name || 'Vibely member');
+                : (
+                    profiles[m.sender_id] ||
+                    m.sender_name ||
+                    'Vibely member'
+                  );
 
             return (
               <article
