@@ -36,8 +36,9 @@ export default function App() {
   useEffect(() => {
     if (!supabaseReady) return;
 
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    supabase.auth.getSession().then(({ data, error }) => {
+      if (error) setNotice(error.message);
+      setSession(data?.session || null);
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange(
@@ -81,7 +82,9 @@ export default function App() {
         }
       });
 
-    return () => supabase.removeChannel(channel);
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [session]);
 
   useEffect(() => {
@@ -96,8 +99,11 @@ export default function App() {
       .order('created_at')
       .limit(100);
 
-    if (error) setNotice(error.message);
-    else setMessages(data || []);
+    if (error) {
+      setNotice(error.message);
+    } else {
+      setMessages(data || []);
+    }
   }
 
   async function authenticate(e) {
@@ -108,7 +114,9 @@ export default function App() {
     const cleanUsername = username.trim().toLowerCase();
 
     if (!/^[a-z0-9_]{3,20}$/.test(cleanUsername)) {
-      setNotice('Username must be 3–20 characters. Use only letters, numbers, and underscores.');
+      setNotice(
+        'Username must be 3–20 characters. Use only letters, numbers, and underscores.'
+      );
       setBusy(false);
       return;
     }
@@ -139,7 +147,9 @@ export default function App() {
         if (data.session) {
           setNotice('Your Vibely account has been created!');
         } else {
-          setNotice('Account created. Please check your Supabase email confirmation settings.');
+          setNotice(
+            'Account created. Please check your Supabase email confirmation settings.'
+          );
         }
       } else {
         const { error } = await supabase.auth.signInWithPassword({
@@ -149,8 +159,8 @@ export default function App() {
 
         if (error) throw error;
       }
-    } catch (e) {
-      setNotice(e.message);
+    } catch (error) {
+      setNotice(error.message);
     } finally {
       setBusy(false);
     }
@@ -163,6 +173,7 @@ export default function App() {
 
     const content = draft.trim();
     setDraft('');
+    setNotice('');
 
     const { data, error } = await supabase
       .from('messages')
@@ -180,7 +191,9 @@ export default function App() {
       setDraft(content);
     } else if (data) {
       setMessages(prev =>
-        prev.some(m => m.id === data.id) ? prev : [...prev, data]
+        prev.some(m => m.id === data.id)
+          ? prev
+          : [...prev, data]
       );
     }
   }
@@ -193,7 +206,10 @@ export default function App() {
       return;
     }
 
-    const path = `${session.user.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
+    setNotice('');
+
+    const path =
+      `${session.user.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, '_')}`;
 
     const { error: uploadError } = await supabase.storage
       .from('chat-media')
@@ -208,15 +224,27 @@ export default function App() {
       .from('chat-media')
       .getPublicUrl(path);
 
-    const { error } = await supabase.from('messages').insert({
-      conversation_id: LOUNGE,
-      sender_id: session.user.id,
-      sender_name: currentUsername,
-      media_url: data.publicUrl,
-      media_type: file.type.startsWith('image/') ? 'image' : 'audio'
-    });
+    const { data: message, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: LOUNGE,
+        sender_id: session.user.id,
+        sender_name: currentUsername,
+        media_url: data.publicUrl,
+        media_type: file.type.startsWith('image/') ? 'image' : 'audio'
+      })
+      .select()
+      .single();
 
-    if (error) setNotice(error.message);
+    if (error) {
+      setNotice(error.message);
+    } else if (message) {
+      setMessages(prev =>
+        prev.some(m => m.id === message.id)
+          ? prev
+          : [...prev, message]
+      );
+    }
 
     const fileInput = document.querySelector('.attach input');
     if (fileInput) fileInput.value = '';
@@ -224,7 +252,7 @@ export default function App() {
 
   async function toggleCamera() {
     if (cameraOn) {
-      videoRef.current?.srcObject?.getTracks().forEach(t => t.stop());
+      videoRef.current?.srcObject?.getTracks().forEach(track => track.stop());
 
       if (videoRef.current) {
         videoRef.current.srcObject = null;
@@ -246,7 +274,9 @@ export default function App() {
       }
 
       setCameraOn(true);
-      setNotice('Camera preview is local only. Video calling is not configured yet.');
+      setNotice(
+        'Camera preview is local only. Video calling is not configured yet.'
+      );
     } catch {
       setNotice('Camera or microphone permission was not granted.');
     }
@@ -298,7 +328,9 @@ export default function App() {
                 value={password}
                 onChange={e => setPassword(e.target.value)}
                 placeholder="At least 6 characters"
-                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+                autoComplete={
+                  mode === 'login' ? 'current-password' : 'new-password'
+                }
               />
             </label>
 
@@ -312,12 +344,17 @@ export default function App() {
           </form>
 
           <p className="switch">
-            {mode === 'login' ? 'New to Vibely?' : 'Already have an account?'}
+            {mode === 'login'
+              ? 'New to Vibely?'
+              : 'Already have an account?'}
             {' '}
-            <button onClick={() => {
-              setMode(mode === 'login' ? 'signup' : 'login');
-              setNotice('');
-            }}>
+            <button
+              type="button"
+              onClick={() => {
+                setMode(mode === 'login' ? 'signup' : 'login');
+                setNotice('');
+              }}
+            >
               {mode === 'login' ? 'Create an account' : 'Sign in'}
             </button>
           </p>
@@ -347,7 +384,10 @@ export default function App() {
             <b>{displayName}</b>
             <small>Available</small>
           </div>
-          <button title="Sign out" onClick={() => supabase.auth.signOut()}>
+          <button
+            title="Sign out"
+            onClick={() => supabase.auth.signOut()}
+          >
             <LogOut size={17} />
           </button>
         </div>
@@ -417,8 +457,9 @@ export default function App() {
 
           {messages.map(m => {
             const messageUsername =
-              m.sender_name ||
-              (m.sender_id === session.user.id ? currentUsername : 'Vibely member');
+              m.sender_id === session.user.id
+                ? currentUsername
+                : (m.sender_name || 'Vibely member');
 
             return (
               <article
@@ -440,7 +481,9 @@ export default function App() {
                     </time>
                   </div>
 
-                  {m.content && <div className="bubble">{m.content}</div>}
+                  {m.content && (
+                    <div className="bubble">{m.content}</div>
+                  )}
 
                   {m.media_type === 'image' && (
                     <img
@@ -492,7 +535,12 @@ export default function App() {
         </form>
 
         {notice && (
-          <div className="toast" onClick={() => setNotice('')}>
+          <div
+            className="toast"
+            onClick={() => setNotice('')}
+            role="button"
+            tabIndex={0}
+          >
             {notice} <b>×</b>
           </div>
         )}
@@ -517,8 +565,12 @@ function SetupScreen() {
           Add your Supabase project details to start chatting.
         </p>
         <div className="setup-steps">
-          <p><b>1.</b> Copy <code>.env.example</code> and rename the copy to <code>.env</code>.</p>
-          <p><b>2.</b> Add your Supabase Project URL and Publishable Key.</p>
+          <p>
+            <b>1.</b> Copy <code>.env.example</code> and rename the copy to <code>.env</code>.
+          </p>
+          <p>
+            <b>2.</b> Add your Supabase Project URL and Publishable Key.
+          </p>
           <p><b>3.</b> Save the file and restart the dev server.</p>
         </div>
         <p className="muted tiny">
