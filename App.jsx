@@ -28,6 +28,11 @@ export default function App() {
   const bottom = useRef(null);
   const videoRef = useRef(null);
 
+  const currentUsername =
+    session?.user?.user_metadata?.username ||
+    session?.user?.email?.split('@')[0] ||
+    'User';
+
   useEffect(() => {
     if (!supabaseReady) return;
 
@@ -159,15 +164,24 @@ export default function App() {
     const content = draft.trim();
     setDraft('');
 
-    const { error } = await supabase.from('messages').insert({
-      conversation_id: LOUNGE,
-      sender_id: session.user.id,
-      content
-    });
+    const { data, error } = await supabase
+      .from('messages')
+      .insert({
+        conversation_id: LOUNGE,
+        sender_id: session.user.id,
+        sender_name: currentUsername,
+        content
+      })
+      .select()
+      .single();
 
     if (error) {
       setNotice(error.message);
       setDraft(content);
+    } else if (data) {
+      setMessages(prev =>
+        prev.some(m => m.id === data.id) ? prev : [...prev, data]
+      );
     }
   }
 
@@ -197,11 +211,15 @@ export default function App() {
     const { error } = await supabase.from('messages').insert({
       conversation_id: LOUNGE,
       sender_id: session.user.id,
+      sender_name: currentUsername,
       media_url: data.publicUrl,
       media_type: file.type.startsWith('image/') ? 'image' : 'audio'
     });
 
     if (error) setNotice(error.message);
+
+    const fileInput = document.querySelector('.attach input');
+    if (fileInput) fileInput.value = '';
   }
 
   async function toggleCamera() {
@@ -310,10 +328,7 @@ export default function App() {
     );
   }
 
-  const displayName =
-    session.user.user_metadata?.display_name ||
-    session.user.user_metadata?.username ||
-    'Vibely member';
+  const displayName = currentUsername;
 
   return (
     <main className="app-shell">
@@ -400,44 +415,48 @@ export default function App() {
             </p>
           </div>
 
-          {messages.map(m => (
-            <article
-              className={`message ${m.sender_id === session.user.id ? 'mine' : ''}`}
-              key={m.id}
-            >
-              <div className="avatar small">
-                {m.sender_id === session.user.id ? 'You' : 'V'}
-              </div>
+          {messages.map(m => {
+            const messageUsername =
+              m.sender_name ||
+              (m.sender_id === session.user.id ? currentUsername : 'Vibely member');
 
-              <div className="bubble-wrap">
-                <div className="message-meta">
-                  <b>
-                    {m.sender_id === session.user.id ? 'You' : 'Vibely member'}
-                  </b>
-                  <time>
-                    {new Date(m.created_at).toLocaleTimeString([], {
-                      hour: '2-digit',
-                      minute: '2-digit'
-                    })}
-                  </time>
+            return (
+              <article
+                className={`message ${m.sender_id === session.user.id ? 'mine' : ''}`}
+                key={m.id}
+              >
+                <div className="avatar small">
+                  {messageUsername[0].toUpperCase()}
                 </div>
 
-                {m.content && <div className="bubble">{m.content}</div>}
+                <div className="bubble-wrap">
+                  <div className="message-meta">
+                    <b>{messageUsername}</b>
+                    <time>
+                      {new Date(m.created_at).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </time>
+                  </div>
 
-                {m.media_type === 'image' && (
-                  <img
-                    className="shared-image"
-                    src={m.media_url}
-                    alt="Shared attachment"
-                  />
-                )}
+                  {m.content && <div className="bubble">{m.content}</div>}
 
-                {m.media_type === 'audio' && (
-                  <audio controls src={m.media_url} />
-                )}
-              </div>
-            </article>
-          ))}
+                  {m.media_type === 'image' && (
+                    <img
+                      className="shared-image"
+                      src={m.media_url}
+                      alt="Shared attachment"
+                    />
+                  )}
+
+                  {m.media_type === 'audio' && (
+                    <audio controls src={m.media_url} />
+                  )}
+                </div>
+              </article>
+            );
+          })}
 
           <div ref={bottom} />
         </div>
@@ -463,7 +482,11 @@ export default function App() {
             <Smile />
           </button>
 
-          <button className="send-btn" disabled={!draft.trim()}>
+          <button
+            type="submit"
+            className="send-btn"
+            disabled={!draft.trim()}
+          >
             <Send size={18} />
           </button>
         </form>
