@@ -4,7 +4,8 @@ import { supabase, supabaseReady } from './supabase';
 import {
   Send, LogOut, Users, MessageCircle, ImagePlus,
   Search, ArrowLeft, UserRound, Settings, Camera,
-  X, Check, Palette, Sun, Moon
+  X, Check, Palette, Sun, Moon, Pencil, Trash2,
+  Smile, Bell, BellRing, Menu, Circle
 } from 'lucide-react';
 
 const LOUNGE = '00000000-0000-0000-0000-000000000001';
@@ -16,6 +17,8 @@ const ACCENTS = {
   pink: '#f06da8',
   red: '#f06464'
 };
+
+const REACTIONS = ['👍', '❤️', '😂', '😮', '😢'];
 
 function usernameToEmail(username) {
   return `${username.trim().toLowerCase()}@vibely.invalid`;
@@ -45,14 +48,31 @@ export default function App() {
   const [theme, setTheme] = useState('dark');
   const [accent, setAccent] = useState('purple');
   const [avatarBusy, setAvatarBusy] = useState(false);
+  const [displayName, setDisplayName] = useState('');
+
+  const [onlineUsers, setOnlineUsers] = useState([]);
+  const [typingUser, setTypingUser] = useState('');
+  const [reactions, setReactions] = useState({});
+  const [readReceipts, setReadReceipts] = useState({});
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const [notificationPermission, setNotificationPermission] = useState(
+    typeof window !== 'undefined' && 'Notification' in window
+      ? Notification.permission
+      : 'unsupported'
+  );
 
   const bottom = useRef(null);
   const avatarInput = useRef(null);
+  const typingTimeout = useRef(null);
+  const typingChannel = useRef(null);
 
   const currentUsername =
     session?.user?.user_metadata?.username ||
     session?.user?.email?.split('@')[0] ||
     'User';
+
+  const currentDisplayName =
+    myProfile?.display_name || currentUsername;
 
   const currentAvatar = myProfile?.avatar_url || '';
 
@@ -66,15 +86,13 @@ export default function App() {
     });
 
     const { data: listener } = supabase.auth.onAuthStateChange(
-      (_event, currentSession) => {
-        setSession(currentSession);
-      }
+      (_event, currentSession) => setSession(currentSession)
     );
 
     return () => listener.subscription.unsubscribe();
   }, []);
 
-  // Load user profiles and saved customization
+  // Load profiles and profile settings
   useEffect(() => {
     if (!session) return;
 
@@ -83,7 +101,7 @@ export default function App() {
     async function loadProfiles() {
       const { data, error } = await supabase
         .from('profiles')
-        .select('id, username, avatar_url, theme, accent_color')
+        .select('id, username, display_name, avatar_url, theme, accent_color, last_seen')
         .order('username');
 
       if (!alive) return;
@@ -102,6 +120,7 @@ export default function App() {
         setMyProfile(mine);
         setTheme(mine.theme || 'dark');
         setAccent(mine.accent_color || 'purple');
+        setDisplayName(mine.display_name || mine.username || '');
       }
     }
 
@@ -111,11 +130,7 @@ export default function App() {
       .channel('vibely-profile-updates')
       .on(
         'postgres_changes',
-        {
-          event: '*',
-          schema: 'public',
-          table: 'profiles'
-        },
+        { event: '*', schema: 'public', table: 'profiles' },
         loadProfiles
       )
       .subscribe();
@@ -123,6 +138,55 @@ export default function App() {
     return () => {
       alive = false;
       supabase.removeChannel(profileChannel);
+    };
+  }, [session]);
+
+  // Online / Offline presence
+  useEffect(() => {
+    if (!session) return;
+
+    const presenceChannel = supabase.channel('vibely-online-users', {
+      config: { presence: { key: session.user.id } }
+    });
+
+    presenceChannel
+      .on('presence', { event: 'sync' }, () => {
+        const state = presenceChannel.presenceState();
+        setOnlineUsers(Object.keys(state));
+      })
+      .subscribe(async status => {
+        if (status === 'SUBSCRIBED') {
+          await presenceChannel.track({
+            user_id: session.user.id,
+            username: currentUsername,
+            online_at: new Date().toISOString()
+          });
+        }
+      });
+
+    return () => {
+      supabase.removeChannel(presenceChannel);
+    };
+  }, [session, currentUsername]);
+
+  // Update last seen
+  useEffect(() => {
+    if (!session) return;
+
+    const updateLastSeen = () => {
+      if (document.visibilityState === 'visible') {
+        supabase
+          .from('profiles')
+          .update({ last_seen: new Date().toISOString() })
+          .eq('id', session.user.id);
+      }
+    };
+
+    updateLastSeen();
+    document.addEventListener('visibilitychange', updateLastSeen);
+
+    return () => {
+      document.removeEventListener('visibilitychange', updateLastSeen);
     };
   }, [session]);
 
@@ -134,6 +198,8 @@ export default function App() {
 
     async function loadMessages() {
       setMessages([]);
+      setReactions({});
+      setReadReceipts({});
 
       const { data, error } = await supabase
         .from('messages')
@@ -149,7 +215,58 @@ export default function App() {
         return;
       }
 
-      setMessages(data || []);
+      const loadedMessages = data || [];
+      setMessages(loadedMessages);
+
+      const ids = loadedMessages.map(message => message.id);
+      if (!ids.length) return;
+
+      const [{ data: reactionData }, { data: readData }] = await Promise.all([
+        supabase
+          .from('message_reactions')
+          .select('*')
+          .in('message_id', ids),
+        supabase
+          .from('message_reads')
+          .select('*')
+          .in('message_id', ids)
+      ]);
+
+      if (!alive) return;
+
+      const reactionMap = {};
+      (reactionData || []).forEach(item => {
+        if (!reactionMap[item.message_id]) reactionMap[item.message_id] = [];
+        reactionMap[item.message_id].push(item);
+      });
+      setReactions(reactionMap);
+
+      const readMap = {};
+      (readData || []).forEach(item => {
+        if (!readMap[item.message_id]) readMap[item.message_id] = [];
+        readMap[item.message_id].push(item);
+      });
+      setReadReceipts(readMap);
+
+      // Mark incoming messages as read
+      const unread = loadedMessages.filter(
+        message => message.sender_id !== session.user.id &&
+          !(readMap[message.id] || []).some(
+            receipt => receipt.user_id === session.user.id
+          )
+      );
+
+      if (unread.length) {
+        await supabase
+          .from('message_reads')
+          .upsert(
+            unread.map(message => ({
+              message_id: message.id,
+              user_id: session.user.id
+            })),
+            { onConflict: 'message_id,user_id', ignoreDuplicates: true }
+          );
+      }
     }
 
     loadMessages();
@@ -159,22 +276,112 @@ export default function App() {
       .on(
         'postgres_changes',
         {
-          event: 'INSERT',
+          event: '*',
           schema: 'public',
           table: 'messages',
           filter: `conversation_id=eq.${activeConversationId}`
         },
-        payload => {
-          const newMessage = payload.new;
+        async payload => {
+          if (payload.eventType === 'INSERT') {
+            const newMessage = payload.new;
 
-          setMessages(previous =>
-            previous.some(m => m.id === newMessage.id)
-              ? previous
-              : [...previous, newMessage]
-          );
+            setMessages(previous =>
+              previous.some(m => m.id === newMessage.id)
+                ? previous
+                : [...previous, newMessage]
+            );
+
+            if (newMessage.sender_id !== session.user.id) {
+              await supabase
+                .from('message_reads')
+                .upsert(
+                  {
+                    message_id: newMessage.id,
+                    user_id: session.user.id
+                  },
+                  { onConflict: 'message_id,user_id', ignoreDuplicates: true }
+                );
+
+              if (
+                typeof window !== 'undefined' &&
+                'Notification' in window &&
+                Notification.permission === 'granted' &&
+                document.hidden
+              ) {
+                new Notification('New message on Vibely', {
+                  body: newMessage.content || 'You received a new attachment.'
+                });
+              }
+            }
+          }
+
+          if (payload.eventType === 'UPDATE') {
+            setMessages(previous =>
+              previous.map(message =>
+                message.id === payload.new.id ? payload.new : message
+              )
+            );
+          }
+
+          if (payload.eventType === 'DELETE') {
+            setMessages(previous =>
+              previous.filter(message => message.id !== payload.old.id)
+            );
+          }
         }
       )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'message_reactions'
+        },
+        () => refreshMessageDetails()
+      )
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'message_reads'
+        },
+        () => refreshMessageDetails()
+      )
       .subscribe();
+
+    async function refreshMessageDetails() {
+      const { data: currentMessages } = await supabase
+        .from('messages')
+        .select('id')
+        .eq('conversation_id', activeConversationId)
+        .limit(100);
+
+      const ids = (currentMessages || []).map(item => item.id);
+      if (!ids.length || !alive) return;
+
+      const [{ data: reactionData }, { data: readData }] = await Promise.all([
+        supabase.from('message_reactions').select('*').in('message_id', ids),
+        supabase.from('message_reads').select('*').in('message_id', ids)
+      ]);
+
+      if (!alive) return;
+
+      const reactionMap = {};
+      (reactionData || []).forEach(item => {
+        if (!reactionMap[item.message_id]) reactionMap[item.message_id] = [];
+        reactionMap[item.message_id].push(item);
+      });
+
+      const readMap = {};
+      (readData || []).forEach(item => {
+        if (!readMap[item.message_id]) readMap[item.message_id] = [];
+        readMap[item.message_id].push(item);
+      });
+
+      setReactions(reactionMap);
+      setReadReceipts(readMap);
+    }
 
     return () => {
       alive = false;
@@ -182,33 +389,115 @@ export default function App() {
     };
   }, [session, activeConversationId]);
 
+  // Typing indicator channel
+  useEffect(() => {
+    if (!session || !activeConversationId) return;
+
+    setTypingUser('');
+
+    const channel = supabase.channel(
+      `typing-${activeConversationId}`,
+      { config: { broadcast: { self: false } } }
+    );
+
+    typingChannel.current = channel;
+
+    channel
+      .on('broadcast', { event: 'typing' }, ({ payload }) => {
+        if (payload?.user_id === session.user.id) return;
+
+        setTypingUser(payload?.is_typing ? payload.username : '');
+      })
+      .subscribe();
+
+    return () => {
+      if (typingTimeout.current) clearTimeout(typingTimeout.current);
+      typingChannel.current = null;
+      supabase.removeChannel(channel);
+    };
+  }, [session, activeConversationId]);
+
+  function handleDraftChange(value) {
+    setDraft(value);
+
+    if (!typingChannel.current || !session) return;
+
+    typingChannel.current.send({
+      type: 'broadcast',
+      event: 'typing',
+      payload: {
+        user_id: session.user.id,
+        username: currentDisplayName,
+        is_typing: true
+      }
+    });
+
+    if (typingTimeout.current) clearTimeout(typingTimeout.current);
+
+    typingTimeout.current = setTimeout(() => {
+      typingChannel.current?.send({
+        type: 'broadcast',
+        event: 'typing',
+        payload: {
+          user_id: session.user.id,
+          username: currentDisplayName,
+          is_typing: false
+        }
+      });
+    }, 1200);
+  }
+
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Save theme or accent color
-  async function updateCustomization(field, value) {
-    if (field === 'theme') setTheme(value);
-    if (field === 'accent_color') setAccent(value);
-
+  // Save profile name, theme and accent color
+  async function updateProfile(updates) {
     const { data, error } = await supabase
       .from('profiles')
-      .update({ [field]: value })
+      .update(updates)
       .eq('id', session.user.id)
       .select()
       .single();
 
     if (error) {
       setNotice(error.message);
-      return;
+      return false;
     }
 
     if (data) {
       setMyProfile(data);
       setProfiles(previous =>
-        previous.map(p => p.id === data.id ? data : p)
+        previous.map(profile => profile.id === data.id ? data : profile)
       );
+
+      if (data.theme) setTheme(data.theme);
+      if (data.accent_color) setAccent(data.accent_color);
+      if (data.display_name !== undefined) {
+        setDisplayName(data.display_name || '');
+      }
     }
+
+    return true;
+  }
+
+  async function saveDisplayName() {
+    const cleanName = displayName.trim();
+
+    if (!cleanName) {
+      setNotice('Please enter a display name.');
+      return;
+    }
+
+    const success = await updateProfile({ display_name: cleanName });
+    if (success) setNotice('Your profile name has been updated.');
+  }
+
+  async function updateCustomization(field, value) {
+    if (field === 'theme') setTheme(value);
+    if (field === 'accent_color') setAccent(value);
+
+    await updateProfile({ [field]: value });
   }
 
   // Upload profile avatar
@@ -250,24 +539,27 @@ export default function App() {
 
     const avatarUrl = `${urlData.publicUrl}?t=${Date.now()}`;
 
-    const { data, error } = await supabase
-      .from('profiles')
-      .update({ avatar_url: avatarUrl })
-      .eq('id', session.user.id)
-      .select()
-      .single();
+    const success = await updateProfile({ avatar_url: avatarUrl });
 
-    if (error) {
-      setNotice(error.message);
-    } else if (data) {
-      setMyProfile(data);
-      setProfiles(previous =>
-        previous.map(p => p.id === data.id ? data : p)
-      );
-      setNotice('Your avatar has been updated!');
+    if (success) setNotice('Your avatar has been updated!');
+    setAvatarBusy(false);
+  }
+
+  // Browser notifications
+  async function enableNotifications() {
+    if (!('Notification' in window)) {
+      setNotice('This browser does not support notifications.');
+      return;
     }
 
-    setAvatarBusy(false);
+    const permission = await Notification.requestPermission();
+    setNotificationPermission(permission);
+
+    if (permission === 'granted') {
+      setNotice('Browser notifications are enabled.');
+    } else {
+      setNotice('Notification permission was not granted.');
+    }
   }
 
   // Authentication
@@ -351,11 +643,13 @@ export default function App() {
 
     setSelectedPerson(person);
     setActiveConversationId(data);
+    setMobileSidebarOpen(false);
   }
 
   function openGroupChat() {
     setSelectedPerson(null);
     setActiveConversationId(LOUNGE);
+    setMobileSidebarOpen(false);
   }
 
   // Send message
@@ -392,6 +686,16 @@ export default function App() {
           : [...previous, data]
       );
     }
+
+    typingChannel.current?.send({
+      type: 'broadcast',
+      event: 'typing',
+      payload: {
+        user_id: session.user.id,
+        username: currentDisplayName,
+        is_typing: false
+      }
+    });
   }
 
   // Upload chat image or audio
@@ -441,6 +745,76 @@ export default function App() {
           ? previous
           : [...previous, data]
       );
+    }
+  }
+
+  // Edit own message
+  async function editMessage(message) {
+    const updatedContent = window.prompt(
+      'Edit your message:',
+      message.content || ''
+    );
+
+    if (updatedContent === null) return;
+
+    const cleanContent = updatedContent.trim();
+
+    if (!cleanContent) {
+      setNotice('Message cannot be empty.');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('messages')
+      .update({
+        content: cleanContent,
+        edited_at: new Date().toISOString()
+      })
+      .eq('id', message.id)
+      .eq('sender_id', session.user.id);
+
+    if (error) setNotice(error.message);
+  }
+
+  // Soft-delete own message
+  async function deleteMessage(message) {
+    const confirmed = window.confirm('Delete this message?');
+    if (!confirmed) return;
+
+    const { error } = await supabase
+      .from('messages')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', message.id)
+      .eq('sender_id', session.user.id);
+
+    if (error) setNotice(error.message);
+  }
+
+  // Toggle reaction
+  async function toggleReaction(messageId, reaction) {
+    const existing = (reactions[messageId] || []).find(
+      item =>
+        item.user_id === session.user.id &&
+        item.reaction === reaction
+    );
+
+    if (existing) {
+      const { error } = await supabase
+        .from('message_reactions')
+        .delete()
+        .eq('id', existing.id);
+
+      if (error) setNotice(error.message);
+    } else {
+      const { error } = await supabase
+        .from('message_reactions')
+        .insert({
+          message_id: messageId,
+          user_id: session.user.id,
+          reaction
+        });
+
+      if (error) setNotice(error.message);
     }
   }
 
@@ -553,7 +927,10 @@ export default function App() {
 
   const visiblePeople = profiles.filter(person =>
     person.id !== session.user.id &&
-    (person.username || '').toLowerCase().includes(search.toLowerCase())
+    (
+      (person.username || '').toLowerCase().includes(search.toLowerCase()) ||
+      (person.display_name || '').toLowerCase().includes(search.toLowerCase())
+    )
   );
 
   return (
@@ -715,241 +1092,502 @@ export default function App() {
           font-size: 12px;
           opacity: .65;
         }
+        .profile-name-input {
+          width: 100%;
+          padding: 11px 12px;
+          margin: 5px 0 9px;
+          border: 1px solid rgba(150,150,180,.3);
+          border-radius: 10px;
+          background: rgba(150,150,180,.08);
+          color: inherit;
+          font: inherit;
+        }
+        .online-dot {
+          display: inline-block;
+          width: 8px;
+          height: 8px;
+          margin-right: 6px;
+          border-radius: 50%;
+          background: #28c994;
+        }
+        .offline-dot {
+          display: inline-block;
+          width: 8px;
+          height: 8px;
+          margin-right: 6px;
+          border-radius: 50%;
+          background: #9297a8;
+        }
+        .message-actions {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 5px;
+          margin-top: 7px;
+          opacity: .85;
+        }
+        .message-actions button,
+        .reaction-button {
+          padding: 4px 7px;
+          border: 1px solid rgba(150,150,180,.2);
+          border-radius: 8px;
+          background: rgba(150,150,180,.08);
+          color: inherit;
+          cursor: pointer;
+          font-size: 12px;
+        }
+        .reaction-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 5px;
+          margin-top: 7px;
+        }
+        .reaction-button.selected {
+          border-color: var(--vibely-accent);
+          background: rgba(155,123,255,.2);
+        }
+        .typing-indicator {
+          padding: 8px 16px;
+          color: #9297a8;
+          font-size: 12px;
+        }
+        .edited-label {
+          margin-left: 5px;
+          font-size: 10px;
+          opacity: .65;
+        }
+        .read-label {
+          margin-top: 5px;
+          text-align: right;
+          font-size: 10px;
+          opacity: .7;
+        }
+        .mobile-menu-button {
+          display: none;
+          border: 0;
+          background: transparent;
+          color: inherit;
+          cursor: pointer;
+          padding: 7px;
+        }
+        .notification-button {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 8px;
+          width: 100%;
+          padding: 10px;
+          margin-top: 9px;
+          border: 1px solid rgba(150,150,180,.2);
+          border-radius: 11px;
+          background: rgba(150,150,180,.08);
+          color: inherit;
+          cursor: pointer;
+          font: inherit;
+        }
+        @media (max-width: 700px) {
+          .mobile-menu-button { display: inline-flex; }
+          .app-shell { position: relative; overflow: hidden; }
+          .app-shell .sidebar {
+            position: absolute !important;
+            z-index: 50;
+            inset: 0 auto 0 0;
+            width: min(300px, 85vw) !important;
+            transform: translateX(-110%);
+            transition: transform .25s ease;
+            box-shadow: 15px 0 40px rgba(0,0,0,.25);
+          }
+          .app-shell.mobile-sidebar-open .sidebar {
+            transform: translateX(0);
+          }
+          .app-shell .chat-panel {
+            width: 100% !important;
+            min-width: 0 !important;
+          }
+          .app-shell .chat-header {
+            gap: 8px;
+          }
+          .app-shell .messages {
+            padding-left: 12px;
+            padding-right: 12px;
+          }
+          .app-shell .composer {
+            gap: 7px;
+            padding: 10px;
+          }
+          .app-shell .message-input {
+            min-width: 0;
+          }
+          .app-shell .message {
+            max-width: 100%;
+          }
+          .app-shell .settings-card {
+            padding: 18px;
+          }
+        }
       `}</style>
 
-      <aside className="sidebar">
-        <div className="brand">
-          <div className="brand-mark">v</div>
-          <span>vibely</span>
-          <small>BETA</small>
-        </div>
-
-        <div className="profile-mini">
-          <Avatar profile={myProfile} label={currentUsername} />
-          <div>
-            <b>{currentUsername}</b>
-            <small>Available</small>
-          </div>
-          <button title="Sign out" onClick={() => supabase.auth.signOut()}>
-            <LogOut size={17} />
-          </button>
-        </div>
-
-        <button
-          className="settings-button"
-          onClick={() => setSettingsOpen(true)}
-        >
-          <Settings size={17} />
-          Profile & Appearance
-        </button>
-
-        <div className="side-label">MESSAGES</div>
-
-        <button
-          className={`nav-item ${!selectedPerson ? 'active' : ''}`}
-          onClick={openGroupChat}
-        >
-          <Users size={18} />
-          Public lounge
-        </button>
-
-        <div className="side-label">PRIVATE CHAT</div>
-
-        <div className="people-search">
-          <Search size={16} />
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Find people..."
-          />
-        </div>
-
-        <div className="people-list">
-          {visiblePeople.map(person => (
-            <button
-              key={person.id}
-              className={`person-item ${
-                selectedPerson?.id === person.id ? 'active' : ''
-              }`}
-              onClick={() => openPrivateChat(person)}
-              disabled={loadingChat}
-            >
-              <Avatar profile={person} label={person.username || 'U'} />
-              <span>{person.username || 'Vibely member'}</span>
-              <MessageCircle size={15} />
-            </button>
-          ))}
-
-          {visiblePeople.length === 0 && (
-            <p className="muted people-empty">
-              No other users found yet.
-            </p>
-          )}
-        </div>
-
-        <div className="side-bottom">
-          <small>Vibely · Find your vibe.</small>
-        </div>
-      </aside>
-
-      <section className="chat-panel">
-        <header className="chat-header">
-          <div className="channel-icon">
-            {selectedPerson ? <UserRound /> : <Users />}
+      <div
+        className={`app-shell-content ${mobileSidebarOpen ? 'mobile-sidebar-open' : ''}`}
+      >
+        <aside className="sidebar">
+          <div className="brand">
+            <div className="brand-mark">v</div>
+            <span>vibely</span>
+            <small>BETA</small>
           </div>
 
-          <div>
-            <h2>
-              {selectedPerson
-                ? selectedPerson.username
-                : 'Public lounge'}
-            </h2>
-            <p>
-              {selectedPerson
-                ? 'Private conversation'
-                : 'Chat with everyone'}
-            </p>
-          </div>
-
-          {selectedPerson && (
-            <button className="back-button" onClick={openGroupChat}>
-              <ArrowLeft size={18} />
-              Group
-            </button>
-          )}
-        </header>
-
-        <div className="messages">
-          {!selectedPerson && (
-            <div className="welcome">
-              <div className="welcome-icon">✦</div>
-              <h2>Welcome to the lounge</h2>
-              <p>
-                This is your shared space. Start a conversation and make someone's day.
-              </p>
+          <div className="profile-mini">
+            <Avatar profile={myProfile} label={currentDisplayName} />
+            <div>
+              <b>{currentDisplayName}</b>
+              <small><span className="online-dot" />Online</small>
             </div>
-          )}
-
-          {selectedPerson && (
-            <div className="private-heading">
-              <Avatar
-                profile={selectedPerson}
-                label={selectedPerson.username}
-              />
-              <h3>{selectedPerson.username}</h3>
-              <p>Your private conversation</p>
-            </div>
-          )}
-
-          {messages.map(message => {
-            const isMine = message.sender_id === session.user.id;
-
-            const senderProfile = profiles.find(
-              p => p.id === message.sender_id
-            );
-
-            const senderName = isMine
-              ? currentUsername
-              : (
-                  senderProfile?.username ||
-                  message.sender_name ||
-                  'Vibely member'
-                );
-
-            return (
-              <article
-                className={`message ${isMine ? 'mine' : ''}`}
-                key={message.id}
-              >
-                <Avatar
-                  profile={isMine ? myProfile : senderProfile}
-                  label={senderName}
-                />
-
-                <div className="bubble-wrap">
-                  <div className="message-meta">
-                    <b>{senderName}</b>
-                    <time>
-                      {new Date(message.created_at).toLocaleTimeString([], {
-                        hour: '2-digit',
-                        minute: '2-digit'
-                      })}
-                    </time>
-                  </div>
-
-                  {message.content && (
-                    <div className="bubble">{message.content}</div>
-                  )}
-
-                  {message.media_type === 'image' && (
-                    <img
-                      className="shared-image"
-                      src={message.media_url}
-                      alt="Shared image"
-                    />
-                  )}
-
-                  {message.media_type === 'audio' && (
-                    <audio controls src={message.media_url} />
-                  )}
-                </div>
-              </article>
-            );
-          })}
-
-          {messages.length === 0 && selectedPerson && (
-            <p className="muted empty-chat">
-              No messages yet. Say hello!
-            </p>
-          )}
-
-          <div ref={bottom} />
-        </div>
-
-        <form className="composer" onSubmit={sendMessage}>
-          <label className="attach" title="Share image or audio">
-            <ImagePlus />
-            <input
-              type="file"
-              accept="image/*,audio/*"
-              onChange={e => {
-                uploadFile(e.target.files?.[0]);
-                e.target.value = '';
-              }}
-            />
-          </label>
-
-          <input
-            className="message-input"
-            value={draft}
-            onChange={e => setDraft(e.target.value)}
-            placeholder={
-              selectedPerson
-                ? `Message ${selectedPerson.username}...`
-                : 'Write a message...'
-            }
-          />
+            <button title="Sign out" onClick={() => supabase.auth.signOut()}>
+              <LogOut size={17} />
+            </button>
+          </div>
 
           <button
-            type="submit"
-            className="send-btn"
-            disabled={!draft.trim()}
+            className="settings-button"
+            onClick={() => setSettingsOpen(true)}
           >
-            <Send size={18} />
+            <Settings size={17} />
+            Profile & Appearance
           </button>
-        </form>
 
-        {notice && (
-          <div className="toast" onClick={() => setNotice('')}>
-            {notice} <b>×</b>
+          <button
+            className="notification-button"
+            onClick={enableNotifications}
+          >
+            {notificationPermission === 'granted'
+              ? <BellRing size={17} />
+              : <Bell size={17} />}
+            {notificationPermission === 'granted'
+              ? 'Notifications enabled'
+              : 'Enable notifications'}
+          </button>
+
+          <div className="side-label">MESSAGES</div>
+
+          <button
+            className={`nav-item ${!selectedPerson ? 'active' : ''}`}
+            onClick={openGroupChat}
+          >
+            <Users size={18} />
+            Public lounge
+          </button>
+
+          <div className="side-label">PRIVATE CHAT</div>
+
+          <div className="people-search">
+            <Search size={16} />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Find people..."
+            />
           </div>
-        )}
 
-        <footer className="chat-footer">
-          Be kind. Keep it friendly.
-          <span>Powered by Vibely</span>
-        </footer>
-      </section>
+          <div className="people-list">
+            {visiblePeople.map(person => {
+              const isOnline = onlineUsers.includes(person.id);
+
+              return (
+                <button
+                  key={person.id}
+                  className={`person-item ${
+                    selectedPerson?.id === person.id ? 'active' : ''
+                  }`}
+                  onClick={() => openPrivateChat(person)}
+                  disabled={loadingChat}
+                >
+                  <Avatar
+                    profile={person}
+                    label={person.display_name || person.username || 'U'}
+                  />
+                  <span>
+                    {person.display_name || person.username || 'Vibely member'}
+                    <small style={{ display: 'block', opacity: .65 }}>
+                      {isOnline ? 'Online' : 'Offline'}
+                    </small>
+                  </span>
+                  {isOnline
+                    ? <Circle size={9} fill="#28c994" color="#28c994" />
+                    : <MessageCircle size={15} />}
+                </button>
+              );
+            })}
+
+            {visiblePeople.length === 0 && (
+              <p className="muted people-empty">No other users found yet.</p>
+            )}
+          </div>
+
+          <div className="side-bottom">
+            <small>Vibely · Find your vibe.</small>
+          </div>
+        </aside>
+
+        <section className="chat-panel">
+          <header className="chat-header">
+            <button
+              className="mobile-menu-button"
+              onClick={() => setMobileSidebarOpen(value => !value)}
+              aria-label="Open menu"
+            >
+              <Menu size={21} />
+            </button>
+
+            <div className="channel-icon">
+              {selectedPerson ? <UserRound /> : <Users />}
+            </div>
+
+            <div>
+              <h2>
+                {selectedPerson
+                  ? (selectedPerson.display_name || selectedPerson.username)
+                  : 'Public lounge'}
+              </h2>
+              <p>
+                {selectedPerson
+                  ? onlineUsers.includes(selectedPerson.id)
+                    ? 'Online'
+                    : 'Offline'
+                  : 'Chat with everyone'}
+              </p>
+            </div>
+
+            {selectedPerson && (
+              <button className="back-button" onClick={openGroupChat}>
+                <ArrowLeft size={18} />
+                Group
+              </button>
+            )}
+          </header>
+
+          <div className="messages">
+            {!selectedPerson && (
+              <div className="welcome">
+                <div className="welcome-icon">✦</div>
+                <h2>Welcome to the lounge</h2>
+                <p>
+                  This is your shared space. Start a conversation and make someone's day.
+                </p>
+              </div>
+            )}
+
+            {selectedPerson && (
+              <div className="private-heading">
+                <Avatar
+                  profile={selectedPerson}
+                  label={selectedPerson.display_name || selectedPerson.username}
+                />
+                <h3>{selectedPerson.display_name || selectedPerson.username}</h3>
+                <p>
+                  {onlineUsers.includes(selectedPerson.id) ? 'Online' : 'Offline'}
+                </p>
+                <p>Your private conversation</p>
+              </div>
+            )}
+
+            {messages.map(message => {
+              const isMine = message.sender_id === session.user.id;
+              const isDeleted = Boolean(message.deleted_at);
+
+              const senderProfile = profiles.find(
+                profile => profile.id === message.sender_id
+              );
+
+              const senderName = isMine
+                ? currentDisplayName
+                : (
+                    senderProfile?.display_name ||
+                    senderProfile?.username ||
+                    message.sender_name ||
+                    'Vibely member'
+                  );
+
+              const messageReactions = reactions[message.id] || [];
+              const messageReads = readReceipts[message.id] || [];
+
+              const seenByOthers = messageReads.some(
+                receipt => receipt.user_id !== session.user.id
+              );
+
+              return (
+                <article
+                  className={`message ${isMine ? 'mine' : ''}`}
+                  key={message.id}
+                >
+                  <Avatar
+                    profile={isMine ? myProfile : senderProfile}
+                    label={senderName}
+                  />
+
+                  <div className="bubble-wrap">
+                    <div className="message-meta">
+                      <b>{senderName}</b>
+                      <time>
+                        {new Date(message.created_at).toLocaleTimeString([], {
+                          hour: '2-digit',
+                          minute: '2-digit'
+                        })}
+                      </time>
+                      {message.edited_at && !isDeleted && (
+                        <span className="edited-label">Edited</span>
+                      )}
+                    </div>
+
+                    {isDeleted ? (
+                      <div className="bubble deleted-message">
+                        This message was deleted.
+                      </div>
+                    ) : (
+                      <>
+                        {message.content && (
+                          <div className="bubble">{message.content}</div>
+                        )}
+
+                        {message.media_type === 'image' && (
+                          <img
+                            className="shared-image"
+                            src={message.media_url}
+                            alt="Shared image"
+                          />
+                        )}
+
+                        {message.media_type === 'audio' && (
+                          <audio controls src={message.media_url} />
+                        )}
+
+                        <div className="message-actions">
+                          <div className="reaction-list">
+                            {REACTIONS.map(emoji => {
+                              const count = messageReactions.filter(
+                                item => item.reaction === emoji
+                              ).length;
+
+                              const selected = messageReactions.some(
+                                item =>
+                                  item.user_id === session.user.id &&
+                                  item.reaction === emoji
+                              );
+
+                              if (!count && !selected) return null;
+
+                              return (
+                                <button
+                                  key={emoji}
+                                  className={`reaction-button ${selected ? 'selected' : ''}`}
+                                  onClick={() => toggleReaction(message.id, emoji)}
+                                >
+                                  {emoji} {count}
+                                </button>
+                              );
+                            })}
+                          </div>
+
+                          <div className="reaction-picker">
+                            <button
+                              type="button"
+                              title="React"
+                              onClick={() => toggleReaction(message.id, '👍')}
+                            >
+                              <Smile size={14} />
+                            </button>
+                          </div>
+
+                          {isMine && (
+                            <>
+                              {message.content && (
+                                <button
+                                  type="button"
+                                  title="Edit message"
+                                  onClick={() => editMessage(message)}
+                                >
+                                  <Pencil size={13} /> Edit
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                title="Delete message"
+                                onClick={() => deleteMessage(message)}
+                              >
+                                <Trash2 size={13} /> Delete
+                              </button>
+                            </>
+                          )}
+                        </div>
+
+                        {isMine && seenByOthers && (
+                          <div className="read-label">Seen</div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </article>
+              );
+            })}
+
+            {messages.length === 0 && selectedPerson && (
+              <p className="muted empty-chat">No messages yet. Say hello!</p>
+            )}
+
+            <div ref={bottom} />
+          </div>
+
+          {typingUser && (
+            <div className="typing-indicator">
+              {typingUser} is typing...
+            </div>
+          )}
+
+          <form className="composer" onSubmit={sendMessage}>
+            <label className="attach" title="Share image or audio">
+              <ImagePlus />
+              <input
+                type="file"
+                accept="image/*,audio/*"
+                onChange={e => {
+                  uploadFile(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
+              />
+            </label>
+
+            <input
+              className="message-input"
+              value={draft}
+              onChange={e => handleDraftChange(e.target.value)}
+              placeholder={
+                selectedPerson
+                  ? `Message ${selectedPerson.display_name || selectedPerson.username}...`
+                  : 'Write a message...'
+              }
+            />
+
+            <button
+              type="submit"
+              className="send-btn"
+              disabled={!draft.trim()}
+            >
+              <Send size={18} />
+            </button>
+          </form>
+
+          {notice && (
+            <div className="toast" onClick={() => setNotice('')}>
+              {notice} <b>×</b>
+            </div>
+          )}
+
+          <footer className="chat-footer">
+            Be kind. Keep it friendly.
+            <span>Powered by Vibely</span>
+          </footer>
+        </section>
+      </div>
 
       {settingsOpen && (
         <div
@@ -970,17 +1608,35 @@ export default function App() {
             </div>
 
             <div className="settings-section">
+              <h3><UserRound size={17} /> Edit Profile</h3>
+              <label>
+                Display name
+                <input
+                  className="profile-name-input"
+                  value={displayName}
+                  onChange={e => setDisplayName(e.target.value)}
+                  maxLength={40}
+                  placeholder="Your display name"
+                />
+              </label>
+              <button className="upload-avatar" onClick={saveDisplayName}>
+                <Check size={15} style={{ verticalAlign: 'middle' }} />
+                {' '}Save Profile
+              </button>
+            </div>
+
+            <div className="settings-section">
               <h3><UserRound size={17} /> Your Avatar</h3>
 
               <div className="avatar-preview">
                 <Avatar
                   profile={myProfile}
-                  label={currentUsername}
+                  label={currentDisplayName}
                   size="large"
                 />
 
                 <div>
-                  <b>{currentUsername}</b>
+                  <b>{currentDisplayName}</b>
                   <p className="muted" style={{ margin: '5px 0 9px' }}>
                     Choose your profile picture
                   </p>
@@ -1053,8 +1709,20 @@ export default function App() {
               </div>
             </div>
 
+            <div className="settings-section">
+              <h3><Bell size={17} /> Notifications</h3>
+              <button
+                className="notification-button"
+                onClick={enableNotifications}
+              >
+                {notificationPermission === 'granted'
+                  ? 'Notifications are enabled'
+                  : 'Allow browser notifications'}
+              </button>
+            </div>
+
             <p className="settings-note">
-              Your appearance preferences are saved to your Vibely account.
+              Your profile and appearance preferences are saved to your Vibely account.
             </p>
           </section>
         </div>
